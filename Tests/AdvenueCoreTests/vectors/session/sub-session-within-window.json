@@ -1,0 +1,59 @@
+{
+  "name": "returning inside the window is a sub-session, not a new session",
+  "source": "packages/sdk-core/src/session-tracker.ts — a gap below windowMs increments subSessionCount and emits nothing; timeSpentMs accumulates across sub-sessions while sessionLengthMs is wall-clock",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 0,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    },
+    {
+      "op": "background",
+      "at": 10000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "activeMs": 10000,
+            "timeSpentMs": 10000,
+            "sessionLengthMs": 10000
+          }
+        }
+      ]
+    },
+    { "op": "foreground", "at": 20000, "expect": [] },
+    {
+      "op": "background",
+      "at": 25000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 2,
+            "activeMs": 5000,
+            "timeSpentMs": 15000,
+            "sessionLengthMs": 25000
+          }
+        }
+      ]
+    }
+  ]
+}

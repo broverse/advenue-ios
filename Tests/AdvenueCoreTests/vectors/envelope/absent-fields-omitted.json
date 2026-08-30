@@ -1,0 +1,12 @@
+{
+  "name": "absent optional fields are omitted, never serialised as null",
+  "source": "packages/shared/src/events.ts uses .optional(), which accepts undefined and REJECTS null — a Swift encoder emitting null would 400 the whole batch",
+  "kind": "envelope",
+  "config": {
+    "platform": "android",
+    "deviceId": "dev-2",
+    "installationId": "00000000-0000-4000-8000-000000000002",
+    "nowMs": 0
+  },
+  "call": { "name": "e" }
+}

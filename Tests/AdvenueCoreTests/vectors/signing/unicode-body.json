@@ -1,0 +1,10 @@
+{
+  "name": "the body is hashed as UTF-8, not UTF-16 code units",
+  "source": "packages/signing/src/index.ts — TextEncoder encodes UTF-8; a Swift port using String.utf16 would diverge here and nowhere else",
+  "kind": "signing",
+  "input": {
+    "secret": "sk_tëst_🔑",
+    "timestamp": "1767225600000",
+    "body": "{\"name\":\"satın alma 🎉\"}"
+  }
+}

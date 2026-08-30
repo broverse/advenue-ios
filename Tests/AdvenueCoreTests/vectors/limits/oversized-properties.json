@@ -1,0 +1,13 @@
+{
+  "name": "properties over the serialised byte budget are rejected at track(), never enqueued",
+  "source": "packages/shared/src/events.ts propertiesSchema refines JSON.stringify(p).length <= MAX_PROPERTIES_BYTES, and apps/ingestion/src/app.ts:142 parses the batch as a whole so any single invalid event answers 400. No valid events are lost — flush() isolates a non-retryable 4xx by re-sending one event at a time — but that isolation pass costs one failed batch POST plus up to batchSize individual POSTs on a mobile radio, and the offending event is dropped regardless. Rejecting at track() loses the same one event and spends no requests.",
+  "kind": "limits",
+  "input": {
+    "name": "purchase",
+    "propertiesBytes": 9000
+  },
+  "expected": {
+    "accepted": false,
+    "reason": "properties_too_large"
+  }
+}

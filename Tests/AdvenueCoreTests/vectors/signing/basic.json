@@ -1,0 +1,10 @@
+{
+  "name": "HMAC-SHA256 over `${timestamp}.${body}`, lowercase hex",
+  "source": "packages/signing/src/index.ts signRequest — Stripe-style timestamped signature; the timestamp is bound so replay is detectable",
+  "kind": "signing",
+  "input": {
+    "secret": "sk_test_conformance",
+    "timestamp": "1767225600000",
+    "body": "{\"apiKey\":\"apk_live_x\",\"events\":[]}"
+  }
+}
