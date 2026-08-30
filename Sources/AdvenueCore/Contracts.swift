@@ -26,8 +26,18 @@ public typealias CancelToken = UInt64
 
 /// Deferred execution, injected so the persist debounce is observable without
 /// waiting for it.
+///
+/// **Isolation contract.** `work` is NOT `@Sendable`: an implementation must
+/// run it in the same isolation domain that called `schedule`. The iOS
+/// scheduler satisfies this by hopping back onto the engine actor before
+/// invoking it; the test scheduler satisfies it by running it inline.
+///
+/// The alternative — marking it `@Sendable` and declaring the queue
+/// `@unchecked Sendable` so it can be captured — would compile by asserting
+/// thread safety the queue does not have. This way the requirement is on the
+/// scheduler, where it can actually be met.
 public protocol Scheduler: Sendable {
-  func schedule(afterMs: Int, _ work: @escaping @Sendable () -> Void) -> CancelToken
+  func schedule(afterMs: Int, _ work: @escaping () -> Void) -> CancelToken
   func cancel(_ token: CancelToken)
 }
 
