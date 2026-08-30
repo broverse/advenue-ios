@@ -11,26 +11,42 @@ final class FacadeTests: XCTestCase {
     super.tearDown()
   }
 
-  /// The simulator's XCTest bundle has no keychain entitlement, so identity
-  /// resolves as `.deferred` and `initialize` deliberately starts nothing.
-  /// That is the SDK behaving correctly, and it is also why the facade tests
-  /// assert on state rather than on delivered events.
-  func testDeferredIdentityStartsNothingAndReportsWhy() {
+  /// Keychain availability differs by environment: a signed macOS test process
+  /// can read it, while an unsigned simulator XCTest bundle has no entitlement
+  /// and every query answers errSecMissingEntitlement. Both are real
+  /// situations, so the assertion is the invariant that must hold in either —
+  /// asserting one environment would make this a test of the runner.
+  func testDeferralAndDeviceIdAlwaysAgree() async {
     let contexts = Locked<[String]>([])
     Advenue.initialize(
-      AdvenueConfig(apiKey: "apk_live_x", onError: { context, _ in contexts.mutate { $0.append(context) } }))
+      AdvenueConfig(
+        apiKey: "apk_live_x",
+        onError: { context, _ in contexts.mutate { $0.append(context) } }))
 
-    XCTAssertTrue(
-      contexts.value.contains("identity.deferred"),
-      "a keychain that cannot be read must be reported, not silently worked around")
+    let deferred = contexts.value.contains("identity.deferred")
+    let id = await Advenue.deviceId()
+
+    if deferred {
+      // Nothing started, so nothing may claim an identity. Returning an
+      // invented id here is the phantom-device bug the design exists to
+      // prevent.
+      XCTAssertNil(id, "a deferred identity must not produce a device id")
+    } else {
+      XCTAssertNotNil(id, "a resolved identity must produce one")
+      XCTAssertFalse(id!.isEmpty)
+    }
   }
 
-  func testDeviceIdIsNilWhileIdentityIsDeferred() async {
+  /// The device id comes from the Keychain, not a fresh mint per launch. When
+  /// it is readable at all, restarting must return the same value — otherwise
+  /// every launch looks like a new device and every install is counted twice.
+  func testDeviceIdIsStableAcrossRestarts() async {
     Advenue.initialize(AdvenueConfig(apiKey: "apk_live_x"))
-    let id = await Advenue.deviceId()
-    // Not a guess, not a fresh UUID — nil. Returning an invented id here is
-    // the phantom-device bug the whole identity design exists to prevent.
-    XCTAssertNil(id)
+    let first = await Advenue.deviceId()
+    Advenue.shutdown()
+    Advenue.initialize(AdvenueConfig(apiKey: "apk_live_x"))
+    let second = await Advenue.deviceId()
+    XCTAssertEqual(first, second)
   }
 
   func testInitializeTwiceIsSafe() {
