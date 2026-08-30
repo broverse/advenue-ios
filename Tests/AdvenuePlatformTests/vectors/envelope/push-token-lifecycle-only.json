@@ -1,0 +1,14 @@
+{
+  "name": "the push token rides install and session events but never a custom one",
+  "source": "packages/sdk-core/src/client.ts track() — a push token is ~180 bytes and the uninstall registry needs it periodically, not on every custom event in a 100-event batch",
+  "kind": "envelope",
+  "config": {
+    "platform": "ios",
+    "deviceId": "dev-1",
+    "installationId": "00000000-0000-4000-8000-000000000001",
+    "nowMs": 1767225600000,
+    "pushToken": "aaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff00001111",
+    "pushProvider": "apns"
+  },
+  "call": { "name": "custom_thing" }
+}

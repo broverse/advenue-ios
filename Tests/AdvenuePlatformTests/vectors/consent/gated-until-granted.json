@@ -1,0 +1,13 @@
+{
+  "name": "with requireConsent, track() is a no-op until consent is granted",
+  "source": "packages/sdk-core/src/client.ts track() — requireConsent gates tracking entirely; an event refused here must not be buffered for later, or granting consent would retroactively send what was collected before it",
+  "kind": "consent",
+  "requireConsent": true,
+  "steps": [
+    { "op": "track", "name": "a", "expectAccepted": false },
+    { "op": "expectPending", "count": 0 },
+    { "op": "setConsent", "granted": true },
+    { "op": "track", "name": "b", "expectAccepted": true },
+    { "op": "expectPending", "count": 1 }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "past the cap the oldest events are dropped, not the newest",
+  "source": "packages/sdk-core/src/queue.ts — a long offline period on a chatty app must not grow the persisted blob without limit; recent events are the ones worth keeping",
+  "kind": "queue",
+  "maxSize": 3,
+  "steps": [
+    { "op": "enqueue", "ids": ["a", "b", "c", "d", "e"] },
+    { "op": "expectPeek", "max": 10, "ids": ["c", "d", "e"] }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "delay doubles per consecutive failure, is capped, then jittered upward by up to 20%",
+  "source": "packages/sdk-core/src/client.ts armBackoff() — exp = min(retryBaseMs * 2^(failures-1), retryCapMs); jitter = exp * 0.2 * random(). The cap applies BEFORE the jitter, so the true maximum delay is capMs * 1.2. The schedule is an implementation choice with no external authority, so this vector exists to pin it for the port rather than to judge it.",
+  "kind": "backoff",
+  "schedule": {
+    "baseMs": 1000,
+    "capMs": 60000,
+    "failures": [1, 2, 3, 4, 5, 6, 7, 8],
+    "expectedNoJitterMs": [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000],
+    "expectedFullJitterMs": [1200, 2400, 4800, 9600, 19200, 38400, 72000, 72000]
+  }
+}

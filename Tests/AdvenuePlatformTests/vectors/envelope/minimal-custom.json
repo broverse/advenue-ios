@@ -1,0 +1,12 @@
+{
+  "name": "a bare custom event carries only the required envelope fields",
+  "source": "packages/shared/src/events.ts clientEventSchema — id, deviceId, type, name, timestamp, platform are required; everything else is optional",
+  "kind": "envelope",
+  "config": {
+    "platform": "ios",
+    "deviceId": "dev-1",
+    "installationId": "00000000-0000-4000-8000-000000000001",
+    "nowMs": 1767225600000
+  },
+  "call": { "name": "level_complete" }
+}

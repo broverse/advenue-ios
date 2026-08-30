@@ -1,0 +1,15 @@
+{
+  "name": "only 408, 429 and 5xx are retryable; every other 4xx is a poison payload",
+  "source": "packages/sdk-core/src/transport.ts IngestError.retryable — a poison payload must not block the queue head forever, and a throttle must not be mistaken for one",
+  "kind": "backoff",
+  "cases": [
+    { "status": 400, "retryable": false },
+    { "status": 401, "retryable": false },
+    { "status": 403, "retryable": false },
+    { "status": 408, "retryable": true },
+    { "status": 413, "retryable": false },
+    { "status": 429, "retryable": true },
+    { "status": 500, "retryable": true },
+    { "status": 503, "retryable": true }
+  ]
+}

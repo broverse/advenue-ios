@@ -1,0 +1,52 @@
+{
+  "name": "a session left open by an OS kill is closed synthetically BEFORE the next one starts",
+  "source": "packages/sdk-core/src/session-tracker.ts handleForeground — activeStart != null with no intervening background means the app was killed; the prior session gets a synthetic end so a consumer never sees two sessions open at once. Order matters: end then start.",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 0,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    },
+    {
+      "op": "foreground",
+      "at": 5000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "activeMs": 5000,
+            "timeSpentMs": 5000,
+            "sessionLengthMs": 5000,
+            "synthetic": true
+          }
+        },
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-2",
+            "sessionNumber": 2,
+            "subSession": 1,
+            "isFirstSession": false,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "exactly at the limits is accepted — the guard must not be off by one",
+  "source": "packages/shared/src/events.ts — max(128) and <= MAX_PROPERTIES_BYTES are inclusive bounds",
+  "kind": "limits",
+  "input": { "nameLength": 128, "propertiesBytes": 8192 },
+  "expected": { "accepted": true, "reason": null }
+}

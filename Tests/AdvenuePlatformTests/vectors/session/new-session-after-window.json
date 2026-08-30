@@ -1,0 +1,57 @@
+{
+  "name": "returning past the window starts session 2 and reports the true gap",
+  "source": "packages/sdk-core/src/session-tracker.ts — gap >= windowMs starts a new session; the default window is 30 minutes",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 0,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    },
+    {
+      "op": "background",
+      "at": 1000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "activeMs": 1000,
+            "timeSpentMs": 1000,
+            "sessionLengthMs": 1000
+          }
+        }
+      ]
+    },
+    {
+      "op": "foreground",
+      "at": 1801000,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-2",
+            "sessionNumber": 2,
+            "subSession": 1,
+            "isFirstSession": false,
+            "timeSinceLastSessionMs": 1800000
+          }
+        }
+      ]
+    }
+  ]
+}

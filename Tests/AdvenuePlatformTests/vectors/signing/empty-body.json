@@ -1,0 +1,6 @@
+{
+  "name": "an empty body still signs, binding only the timestamp",
+  "source": "packages/signing/src/index.ts signRequest — no special case for an empty message",
+  "kind": "signing",
+  "input": { "secret": "sk_test_conformance", "timestamp": "0", "body": "" }
+}

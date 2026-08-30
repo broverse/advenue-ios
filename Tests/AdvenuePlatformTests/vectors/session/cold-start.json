@@ -1,0 +1,24 @@
+{
+  "name": "the first foreground starts session 1 and reports no gap",
+  "source": "packages/sdk-core/src/session-tracker.ts handleForeground — no prior state means a new session; timeSinceLastSessionMs is 0 rather than Infinity, which would not survive JSON",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 1000,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    }
+  ]
+}
