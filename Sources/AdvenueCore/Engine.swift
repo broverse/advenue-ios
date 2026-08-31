@@ -73,6 +73,12 @@ public actor AdvenueEngine {
   private var pushToken: String?
   private var pushProvider: String?
   private var deviceInfo: [String: AdvenueValue]?
+  /// An install refused because consent was closed, kept so granting consent
+  /// later still sends one. Without this an app using `requireConsent` that
+  /// gets consent after launch never sends an install at all — no install, no
+  /// attribution, for the life of that installation.
+  private var installDeferred: (token: String?, properties: [String: AdvenueValue]?,
+    attestation: AttestationResult?, challenge: String?)?
   private var skan: SkanStateMachine?
   private var skanReporter: (any SkanReporter)?
   private var flushing = false
@@ -163,7 +169,11 @@ public actor AdvenueEngine {
     adservicesToken: String?, properties: [String: AdvenueValue]? = nil,
     attestation: AttestationResult? = nil, attestationChallenge: String? = nil
   ) -> Bool {
-    if forgotten || (config.requireConsent && !consent) { return false }
+    if forgotten { return false }
+    if config.requireConsent && !consent {
+      installDeferred = (adservicesToken, properties, attestation, attestationChallenge)
+      return false
+    }
     if store.string(forKey: INSTALL_SENT_KEY) == "1" { return false }
 
     var event = ClientEvent(
@@ -206,6 +216,13 @@ public actor AdvenueEngine {
   public func setConsent(_ granted: Bool) {
     consent = granted
     store.set(granted ? "granted" : "denied", forKey: CONSENT_KEY)
+
+    // Granting consent releases an install that was refused for the lack of it.
+    guard granted, let deferred = installDeferred else { return }
+    installDeferred = nil
+    trackInstall(
+      adservicesToken: deferred.token, properties: deferred.properties,
+      attestation: deferred.attestation, attestationChallenge: deferred.challenge)
   }
 
   /// Granular ad-platform consent. Last write wins and it is persisted, so it
@@ -257,6 +274,10 @@ public actor AdvenueEngine {
   public func recordSkan(
     event: String?, revenueMicros: String? = nil, revenueCurrency: String? = nil
   ) async {
+    // Apple's conversion value is a measurement like any other, so it is gated
+    // like any other. Reporting revenue for a user who has not consented is a
+    // compliance failure, not a parity detail.
+    if forgotten || (config.requireConsent && !consent) { return }
     guard let skan, let reporter = skanReporter else { return }
     guard let update = skan.record(
       event: event, revenueMicros: revenueMicros, revenueCurrency: revenueCurrency)
@@ -335,8 +356,15 @@ public actor AdvenueEngine {
   }
 
   public func notifyForeground() {
-    for event in sessions.handleForeground() {
+    let events = sessions.handleForeground()
+    for event in events {
       track(event.name, properties: event.properties, type: "session")
+    }
+    // A conversion rule may name "session", and the RN SDK has always fed it.
+    // The generic name rather than session_start/session_end keeps one rule
+    // matching both a cold start and a return.
+    if !events.isEmpty {
+      Task { [weak self] in await self?.recordSkan(event: "session") }
     }
   }
 

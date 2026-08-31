@@ -48,9 +48,13 @@ final class InstallTests: XCTestCase {
     XCTAssertFalse(refused)
     XCTAssertNil(store.raw(INSTALL_SENT_KEY), "a refused install must leave no flag")
 
+    // Granting consent now RELEASES the deferred install rather than merely
+    // permitting a later one — an app that never calls trackInstall again
+    // would otherwise have no install at all.
     await e.setConsent(true)
-    let accepted = await e.trackInstall(adservicesToken: nil)
-    XCTAssertTrue(accepted, "the install must still be available after consent")
+    let pending = await e.pendingEvents()
+    XCTAssertEqual(pending.filter { $0.type == "install" }.count, 1)
+    XCTAssertEqual(store.raw(INSTALL_SENT_KEY), "1")
   }
 
   func testIdentityFieldsRideEveryEvent() async {

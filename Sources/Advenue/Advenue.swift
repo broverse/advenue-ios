@@ -23,8 +23,12 @@ public enum Advenue {
   /// Records an event. Synchronous, non-blocking and ordered.
   public static func track(_ name: String, properties: [String: AdvenueValue]? = nil) {
     state.submit(.track(name: name, properties: properties, type: "custom"))
-    // SKAN sees every tracked event: a conversion rule can name any of them.
-    state.submit(.recordSkan(event: name, revenueMicros: nil, revenueCurrency: nil))
+    // SKAN sees app events, never the SDK's own. An `adv_`-prefixed signal —
+    // adv_meta_aem, adv_skan_update — satisfying a conversion rule would move
+    // an advertiser's conversion value on the SDK's behalf.
+    if !name.hasPrefix("adv_") {
+      state.submit(.recordSkan(event: name, revenueMicros: nil, revenueCurrency: nil))
+    }
   }
 
   /// Reports revenue to SKAdNetwork, in canonical micros. A string rather than
