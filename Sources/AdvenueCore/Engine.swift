@@ -235,6 +235,7 @@ public enum Command: Sendable {
   case forgetMe
   case foreground
   case background
+  case flush
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -288,6 +289,8 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.notifyForeground()
     case .background:
       await engine.notifyBackground()
+    case .flush:
+      await engine.flush()
     }
   }
 

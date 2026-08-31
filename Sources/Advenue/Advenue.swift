@@ -44,8 +44,18 @@ public enum Advenue {
   /// be lost.
   public static func processDeepLink(_ url: URL) { state.deepLink(url) }
 
+  /// Sends what is buffered. Safe to call at any time; a no-op when the queue
+  /// is empty or a backoff window is open.
+  public static func flush() { state.submit(.flush) }
+
   public static func notifyForeground() { state.submit(.foreground) }
-  public static func notifyBackground() { state.submit(.background) }
+
+  /// Backgrounding both closes the session and flushes: a batch stranded at the
+  /// moment the app leaves the foreground may not be sent for hours.
+  public static func notifyBackground() {
+    state.submit(.background)
+    state.submit(.flush)
+  }
 
   /// Presents the ATT prompt. The app decides when; the SDK never prompts on
   /// its own.
@@ -75,8 +85,12 @@ final class FacadeState: @unchecked Sendable {
   private var resolvedDeviceId: String?
   private var pendingDeepLinks: [URL] = []
   private var appInstanceIdProvider: (@Sendable () async -> String?)?
+  private var flushTimer: DispatchSourceTimer?
 
-  func start(_ config: AdvenueConfig) {
+  /// `transport` is a parameter, not a hidden construction, because an unwired
+  /// transport is otherwise invisible: every component of the send path can be
+  /// green while nothing joins them. `SeamTests` injects a recorder here.
+  func start(_ config: AdvenueConfig, transport: (any EventTransport)? = nil) {
     // Replace-and-shut-down, never add.
     stop()
 
@@ -100,13 +114,21 @@ final class FacadeState: @unchecked Sendable {
       osVersion = nil
     #endif
 
+    let eventTransport =
+      transport
+      ?? HttpTransport(
+        endpoint: config.endpoint, apiKey: config.apiKey,
+        signingSecret: config.signingSecret)
+
     let engine = AdvenueEngine(
       config: EngineConfig(
         apiKey: config.apiKey, platform: "ios", deviceId: deviceId,
         installationId: installationId, appVersion: config.appVersion,
         osVersion: osVersion, sdkVersion: AdvenueVersion.current,
-        requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs),
+        requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,
+        batchSize: config.batchSize),
       store: store, clock: SystemClock(), scheduler: TimerScheduler(), uuid: uuid,
+      transport: eventTransport,
       onError: config.onError)
     let pipe = CommandPipe(engine: engine, onError: config.onError)
 
@@ -123,6 +145,18 @@ final class FacadeState: @unchecked Sendable {
     // link is attributed to the launch it belongs to.
     for url in buffered { send(url) }
     pipe.submit(.foreground)
+
+    if config.flushIntervalMs > 0 {
+      let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+      timer.schedule(
+        deadline: .now() + .milliseconds(config.flushIntervalMs),
+        repeating: .milliseconds(config.flushIntervalMs))
+      timer.setEventHandler { [weak self] in self?.submit(.flush) }
+      timer.resume()
+      lock.lock()
+      flushTimer = timer
+      lock.unlock()
+    }
   }
 
   func submit(_ command: Command) {
@@ -188,8 +222,14 @@ final class FacadeState: @unchecked Sendable {
   func stop() {
     lock.lock()
     let pipe = self.pipe
+    let timer = flushTimer
     self.pipe = nil
+    flushTimer = nil
     lock.unlock()
+    // Cancel before the pipe shuts down: a timer firing into a finished stream
+    // is harmless, but leaving it running leaks a repeating source per
+    // initialize() call.
+    timer?.cancel()
     pipe?.shutdown()
   }
 }

@@ -8,6 +8,11 @@ public struct AdvenueConfig: Sendable {
   public var appVersion: String?
   public var requireConsent: Bool
   public var sessionWindowMs: Int64
+  /// Events per request. Matches sdk-core.
+  public var batchSize: Int
+  /// Auto-flush period. Zero disables the timer, which is what tests want and
+  /// no shipping app does.
+  public var flushIntervalMs: Int
 
   /// Per-key HMAC secret. **Read this before setting it.** The signature
   /// provides integrity and replay protection, not authentication: anything
@@ -25,6 +30,8 @@ public struct AdvenueConfig: Sendable {
     appVersion: String? = nil,
     requireConsent: Bool = false,
     sessionWindowMs: Int64 = DEFAULT_SESSION_WINDOW_MS,
+    batchSize: Int = 20,
+    flushIntervalMs: Int = 15_000,
     signingSecret: String? = nil,
     onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in }
   ) {
@@ -33,6 +40,8 @@ public struct AdvenueConfig: Sendable {
     self.appVersion = appVersion
     self.requireConsent = requireConsent
     self.sessionWindowMs = sessionWindowMs
+    self.batchSize = batchSize
+    self.flushIntervalMs = flushIntervalMs
     self.signingSecret = signingSecret
     self.onError = onError
   }
