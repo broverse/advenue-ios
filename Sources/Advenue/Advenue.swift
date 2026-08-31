@@ -153,6 +153,7 @@ final class FacadeState: @unchecked Sendable {
   private let acceptedAppId = AcceptedAppId()
   private var startedConfig: AdvenueConfig?
   private var pendingDeepLinks: [URL] = []
+  private var seenAemUrlHashes: Set<String> = []
   private var appInstanceIdProvider: (@Sendable () async -> String?)?
   private var flushTimer: DispatchSourceTimer?
 
@@ -278,6 +279,10 @@ final class FacadeState: @unchecked Sendable {
           idfa: enrichment.idfa, vendorId: enrichment.vendorId,
           appInstanceId: enrichment.appInstanceId))
       self?.submit(.setDeviceInfo(collectDeviceInfo()))
+      // The CMP writes TCF to the standard defaults, and reading it is the
+      // difference between shipping a real consent signal and shipping none.
+      // Submitted before the install so the first event carries it.
+      if let consent = readTcf() { self?.submit(.setConsentData(consent)) }
       self?.submit(
         .trackInstall(
           adservicesToken: enrichment.adservicesToken,
@@ -371,6 +376,28 @@ final class FacadeState: @unchecked Sendable {
     submit(
       .track(
         name: "deep_link", properties: ["url": .string(url.absoluteString)], type: "custom"))
+
+    // Meta AEM: a link from Meta carries al_applink_data with an opaque,
+    // Meta-encrypted campaign_ids blob. Emitted at most once per URL — the same
+    // link re-opened is not a second measurement, and the server dedups on this
+    // hash too.
+    guard
+      let applink = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+        .queryItems?.first(where: { $0.name == "al_applink_data" })?.value,
+      let campaignIds = extractAemCampaignIds(applink)
+    else { return }
+
+    let hash = AdvenuePlatform.sha256Hex(url.absoluteString)
+    lock.lock()
+    let fresh = seenAemUrlHashes.insert(hash).inserted
+    lock.unlock()
+    guard fresh else { return }
+
+    submit(
+      .track(
+        name: "adv_meta_aem",
+        properties: ["campaignIds": .string(campaignIds), "sourceUrlHash": .string(hash)],
+        type: "custom"))
   }
 
   func stop() {

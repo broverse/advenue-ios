@@ -239,6 +239,37 @@ final class SeamTests: XCTestCase {
     XCTAssertNil(install?.attestationToken)
   }
 
+  /// Meta AEM: a link from Meta carries an opaque campaign_ids blob. Emitted at
+  /// most once per URL — the same link re-opened is not a second measurement,
+  /// and the server dedups on the same hash.
+  func testAMetaLinkEmitsOneAemEventAndOnlyOne() async throws {
+    let transport = RecordingEventTransport()
+    let state = FacadeState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    var components = URLComponents(string: "https://go.advenue.io/x")!
+    components.queryItems = [
+      URLQueryItem(name: "al_applink_data", value: #"{"campaign_ids":"blob-seam"}"#)
+    ]
+    let link = components.url!
+
+    state.deepLink(link)
+    state.deepLink(link)
+
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "adv_meta_aem" }
+    }
+
+    let events = await transport.events
+    let aem = events.filter { $0.name == "adv_meta_aem" }
+    XCTAssertEqual(aem.count, 1, "the same link re-opened is not a second measurement")
+    XCTAssertEqual(aem.first?.properties?["campaignIds"], .string("blob-seam"))
+    XCTAssertNotNil(aem.first?.properties?["sourceUrlHash"])
+  }
+
   /// Polls, re-flushing each round. A flush submitted while one is already in
   /// flight is a no-op by design — the re-entrancy guard — so a single Flush is
   /// not enough to drain a queue that grew while the first request was out. In

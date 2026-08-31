@@ -1,4 +1,5 @@
 import AdvenueCore
+import CryptoKit
 import Foundation
 
 /// Spec §5: the install waits this long for enrichment and no longer. Matches
@@ -133,4 +134,11 @@ func withDeadline<T: Sendable>(
     group.cancelAll()
     return first
   }
+}
+
+
+/// Lowercase hex SHA-256. Used for the Meta AEM `sourceUrlHash`, which both the
+/// SDK and the server dedup on, so the two must agree byte for byte.
+public func sha256Hex(_ value: String) -> String {
+  SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
 }
