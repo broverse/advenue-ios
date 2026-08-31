@@ -1,0 +1,15 @@
+{
+  "name": "when every event in the batch is poison, all of them are dropped and reported",
+  "source": "packages/sdk-core/src/client.ts isolatePoison() — each non-retryable single-event send acks and reports through onDrop, so the queue head can never be blocked forever by a poison batch.",
+  "kind": "flush",
+  "batchSize": 3,
+  "queue": ["e1", "e2", "e3", "e4"],
+  "responses": [400, 400, 400, 400],
+  "expect": {
+    "requests": [["e1", "e2", "e3"], ["e1"], ["e2"], ["e3"]],
+    "acked": ["e1", "e2", "e3"],
+    "dropped": ["e1", "e2", "e3"],
+    "pending": ["e4"],
+    "failuresAfter": 0
+  }
+}

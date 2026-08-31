@@ -1,0 +1,15 @@
+{
+  "name": "a non-retryable batch is re-sent one event at a time; only the poison event is dropped",
+  "source": "packages/sdk-core/src/client.ts isolatePoison() — ingest parses a batch as a whole (apps/ingestion/src/app.ts eventBatchSchema.safeParse) and answers one 400 for the whole batch, so the client must find the offender rather than discard the batch.",
+  "kind": "flush",
+  "batchSize": 3,
+  "queue": ["e1", "e2", "e3"],
+  "responses": [400, 204, 400, 204],
+  "expect": {
+    "requests": [["e1", "e2", "e3"], ["e1"], ["e2"], ["e3"]],
+    "acked": ["e1", "e2", "e3"],
+    "dropped": ["e2"],
+    "pending": [],
+    "failuresAfter": 0
+  }
+}

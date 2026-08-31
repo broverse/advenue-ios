@@ -1,0 +1,15 @@
+{
+  "name": "a transient failure keeps the batch and arms the backoff",
+  "source": "packages/sdk-core/src/client.ts flush() — the retryable branch calls armBackoff() and returns without acking, so a 5xx costs a retry rather than the events.",
+  "kind": "flush",
+  "batchSize": 3,
+  "queue": ["e1", "e2", "e3", "e4"],
+  "responses": [500],
+  "expect": {
+    "requests": [["e1", "e2", "e3"]],
+    "acked": [],
+    "dropped": [],
+    "pending": ["e1", "e2", "e3", "e4"],
+    "failuresAfter": 1
+  }
+}

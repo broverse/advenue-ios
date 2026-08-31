@@ -1,0 +1,15 @@
+{
+  "name": "isolation stops at the first transient error and leaves the rest queued",
+  "source": "packages/sdk-core/src/client.ts isolatePoison() — the transient branch returns rather than continuing, so a network drop mid-isolation cannot turn deliverable events into dropped ones.",
+  "kind": "flush",
+  "batchSize": 3,
+  "queue": ["e1", "e2", "e3"],
+  "responses": [400, 204, 500],
+  "expect": {
+    "requests": [["e1", "e2", "e3"], ["e1"], ["e2"]],
+    "acked": ["e1"],
+    "dropped": [],
+    "pending": ["e2", "e3"],
+    "failuresAfter": 0
+  }
+}
