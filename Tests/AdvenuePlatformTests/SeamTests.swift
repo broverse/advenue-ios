@@ -186,6 +186,59 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(call?.fine, 10, "an unconfirmed value was never retried")
   }
 
+  /// The fifth seam. Four capabilities in this SDK have been defined and joined
+  /// to nothing; this asserts the attestation reaches the install rather than
+  /// existing beside it.
+  func testAttestationReachesTheInstallEvent() async throws {
+    let transport = RecordingEventTransport()
+    let state = FacadeState()
+    let sources = EnrichmentSources(
+      searchAdsToken: { nil },
+      advertisingId: { (idfa: nil, vendorId: nil) },
+      appInstanceId: { nil },
+      attestation: {
+        (
+          challenge: "challenge-seam",
+          result: AttestationResult(keyId: "key-seam", attestationObject: "attest-seam")
+        )
+      })
+
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, sources: sources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
+    let install = await transport.installEvent()
+
+    XCTAssertEqual(install?.attestationToken, "attest-seam", "the attestation never shipped")
+    XCTAssertEqual(install?.attestationType, "app-attest")
+    XCTAssertEqual(install?.attestationKeyId, "key-seam")
+    XCTAssertEqual(install?.attestationChallenge, "challenge-seam")
+  }
+
+  /// An install held for attestation is an install lost. Every failure path —
+  /// unsupported device, challenge fetch, attestKey — must ship it anyway.
+  func testAFailedAttestationStillShipsTheInstall() async throws {
+    let transport = RecordingEventTransport()
+    let state = FacadeState()
+    let sources = EnrichmentSources(
+      searchAdsToken: { nil },
+      advertisingId: { (idfa: nil, vendorId: nil) },
+      appInstanceId: { nil },
+      attestation: { nil })
+
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, sources: sources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
+    let install = await transport.installEvent()
+    XCTAssertNotNil(install, "the install must ship without attestation")
+    XCTAssertNil(install?.attestationToken)
+  }
+
   /// Polls, re-flushing each round. A flush submitted while one is already in
   /// flight is a no-op by design — the re-entrancy guard — so a single Flush is
   /// not enough to drain a queue that grew while the first request was out. In

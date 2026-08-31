@@ -160,7 +160,8 @@ public actor AdvenueEngine {
   /// worse failure.
   @discardableResult
   public func trackInstall(
-    adservicesToken: String?, properties: [String: AdvenueValue]? = nil
+    adservicesToken: String?, properties: [String: AdvenueValue]? = nil,
+    attestation: AttestationResult? = nil, attestationChallenge: String? = nil
   ) -> Bool {
     if forgotten || (config.requireConsent && !consent) { return false }
     if store.string(forKey: INSTALL_SENT_KEY) == "1" { return false }
@@ -183,6 +184,12 @@ public actor AdvenueEngine {
     event.pushProvider = pushProvider
     // Install-only: an attribution input, not a per-event property.
     event.adservicesToken = adservicesToken
+    if let attestation {
+      event.attestationToken = attestation.attestationObject
+      event.attestationType = "app-attest"
+      event.attestationKeyId = attestation.keyId
+      event.attestationChallenge = attestationChallenge
+    }
     // Merged rather than replacing: a caller-supplied property of the same name
     // is the app's own and wins.
     if let deviceInfo {
@@ -426,7 +433,8 @@ public enum Command: Sendable {
   case enableSkan(
     mapper: ConversionValueMapper, currency: String?, installationId: String,
     reporter: any SkanReporter)
-  case trackInstall(adservicesToken: String?)
+  case trackInstall(
+    adservicesToken: String?, attestation: AttestationResult?, attestationChallenge: String?)
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -484,8 +492,9 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.flush()
     case .setIdentity(let idfa, let vendorId, let appInstanceId):
       await engine.setIdentity(idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId)
-    case .trackInstall(let token):
-      await engine.trackInstall(adservicesToken: token)
+    case .trackInstall(let token, let attestation, let challenge):
+      await engine.trackInstall(
+        adservicesToken: token, attestation: attestation, attestationChallenge: challenge)
     case .setConsentData(let consent):
       await engine.setConsentData(consent)
     case .setPushToken(let token, let provider):

@@ -255,7 +255,22 @@ final class FacadeState: @unchecked Sendable {
     // returns synchronously — an SDK that blocks
     // didFinishLaunchingWithOptions for three seconds is one nobody ships.
     let installSources =
-      sources ?? EnrichmentSources.system(appInstanceIdProvider: currentAppInstanceIdProvider)
+      sources
+      ?? EnrichmentSources.system(
+        appInstanceIdProvider: currentAppInstanceIdProvider,
+        attestation: {
+          // Two round trips, both best-effort: a device that cannot attest, a
+          // challenge the server would not issue, or an attestKey failure all
+          // yield nil and the install ships without the fields. An install held
+          // for attestation is an install lost.
+          let attestor = DeviceCheckAttestation(secure: secure)
+          let challenges = HttpChallengeFetcher(
+            endpoint: config.endpoint, apiKey: config.apiKey)
+          guard let challenge = try? await challenges.challenge(deviceId: deviceId),
+            let result = try? await attestor.attest(challenge: challenge)
+          else { return nil }
+          return (challenge: challenge, result: result)
+        })
     Task { [weak self] in
       let enrichment = await collectEnrichment(installSources, deadlineMs: INSTALL_WINDOW_MS)
       self?.submit(
@@ -263,7 +278,11 @@ final class FacadeState: @unchecked Sendable {
           idfa: enrichment.idfa, vendorId: enrichment.vendorId,
           appInstanceId: enrichment.appInstanceId))
       self?.submit(.setDeviceInfo(collectDeviceInfo()))
-      self?.submit(.trackInstall(adservicesToken: enrichment.adservicesToken))
+      self?.submit(
+        .trackInstall(
+          adservicesToken: enrichment.adservicesToken,
+          attestation: enrichment.attestation,
+          attestationChallenge: enrichment.attestationChallenge))
       self?.submit(.flush)
     }
   }
