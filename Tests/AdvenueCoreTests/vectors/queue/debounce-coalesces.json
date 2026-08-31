@@ -1,6 +1,6 @@
 {
   "name": "a burst schedules exactly one write, and ack cancels it and writes synchronously",
-  "source": "packages/sdk-core/src/queue.ts persist strategy — enqueue debounces, ack and clear are flush boundaries where stale storage would mean event loss or double-send",
+  "source": "retired: packages/sdk-core/src/queue.ts persist strategy — enqueue debounces, ack and clear are flush boundaries where stale storage would mean event loss or double-send",
   "kind": "queue",
   "maxSize": 10,
   "steps": [

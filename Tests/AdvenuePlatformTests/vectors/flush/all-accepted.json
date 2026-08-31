@@ -1,6 +1,6 @@
 {
   "name": "a fully accepted batch is acked and leaves the remainder queued",
-  "source": "packages/sdk-core/src/client.ts flush() — peek(batchSize), send, then queue.ack(events). No vector kind covered the flush path before this one, so all three implementations could drift here silently.",
+  "source": "retired: packages/sdk-core/src/client.ts flush() — peek(batchSize), send, then queue.ack(events). No vector kind covered the flush path before this one, so all three implementations could drift here silently.",
   "kind": "flush",
   "batchSize": 3,
   "queue": ["e1", "e2", "e3", "e4"],

@@ -1,6 +1,6 @@
 {
   "name": "an unparseable persisted blob loads as empty instead of throwing",
-  "source": "packages/sdk-core/src/queue.ts load() — a corrupt blob must not brick the SDK on every launch; losing the buffer beats never starting",
+  "source": "retired: packages/sdk-core/src/queue.ts load() — a corrupt blob must not brick the SDK on every launch; losing the buffer beats never starting",
   "kind": "queue",
   "maxSize": 10,
   "preloadRaw": "{not json",

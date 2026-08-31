@@ -1,6 +1,6 @@
 {
   "name": "a second flush inside the backoff window issues no request",
-  "source": "packages/sdk-core/src/client.ts flush() — the guard `this.now() < this.backoffUntilMs` returns early. Without it every client in an outage retries in lockstep and the recovery is a thundering herd.",
+  "source": "retired: packages/sdk-core/src/client.ts flush() — the guard `this.now() < this.backoffUntilMs` returns early. Without it every client in an outage retries in lockstep and the recovery is a thundering herd.",
   "kind": "flush",
   "batchSize": 3,
   "queue": ["e1", "e2", "e3"],

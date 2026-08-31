@@ -1,6 +1,6 @@
 {
   "name": "returning past the window starts session 2 and reports the true gap",
-  "source": "packages/sdk-core/src/session-tracker.ts — gap >= windowMs starts a new session; the default window is 30 minutes",
+  "source": "retired: packages/sdk-core/src/session-tracker.ts — gap >= windowMs starts a new session; the default window is 30 minutes",
   "kind": "session",
   "windowMs": 1800000,
   "steps": [

@@ -1,6 +1,6 @@
 {
   "name": "returning inside the window is a sub-session, not a new session",
-  "source": "packages/sdk-core/src/session-tracker.ts — a gap below windowMs increments subSessionCount and emits nothing; timeSpentMs accumulates across sub-sessions while sessionLengthMs is wall-clock",
+  "source": "retired: packages/sdk-core/src/session-tracker.ts — a gap below windowMs increments subSessionCount and emits nothing; timeSpentMs accumulates across sub-sessions while sessionLengthMs is wall-clock",
   "kind": "session",
   "windowMs": 1800000,
   "steps": [

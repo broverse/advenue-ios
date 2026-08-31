@@ -1,6 +1,6 @@
 {
   "name": "forgetMe empties the buffer and blocks every later event",
-  "source": "packages/sdk-core/src/client.ts forgetMe() — an erasure request must drop what is buffered as well as what comes next. NOTE for porters: the core wipes only its StorageAdapter keys; the durable device id lives in platform secure storage and is wiped separately by the platform layer (spec 2026-08-31-native-ios-sdk-design §5). A port that calls only this function leaves the identifier behind — an erasure that does not erase.",
+  "source": "retired: packages/sdk-core/src/client.ts forgetMe() — an erasure request must drop what is buffered as well as what comes next. NOTE for porters: the core wipes only its StorageAdapter keys; the durable device id lives in platform secure storage and is wiped separately by the platform layer (spec 2026-08-31-native-ios-sdk-design §5). A port that calls only this function leaves the identifier behind — an erasure that does not erase.",
   "kind": "consent",
   "requireConsent": false,
   "steps": [

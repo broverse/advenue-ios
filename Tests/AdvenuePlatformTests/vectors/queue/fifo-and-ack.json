@@ -1,6 +1,6 @@
 {
   "name": "peek returns insertion order and ack removes exactly the acked ids",
-  "source": "packages/sdk-core/src/queue.ts — durable FIFO buffer; ack filters by id so an out-of-order response cannot drop the wrong events",
+  "source": "retired: packages/sdk-core/src/queue.ts — durable FIFO buffer; ack filters by id so an out-of-order response cannot drop the wrong events",
   "kind": "queue",
   "maxSize": 10,
   "steps": [

@@ -67,27 +67,68 @@ final class SeamTests: XCTestCase {
   /// assert the wiring rather than the history of the developer's laptop.
   override func setUp() {
     super.setUp()
+    Self.clearPersistedState()
+  }
+
+  /// Clears the state a previous test could have left on this host.
+  ///
+  /// Called from tearDown as well as setUp, and that is the whole fix: the SKAN
+  /// machine persists on the pipe's thread, so a write from the previous test
+  /// could land AFTER the next test's setUp had already cleared. Clearing once
+  /// the writer is stopped leaves nothing to race.
+  private static func clearPersistedState() {
     let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
     defaults?.removeObject(forKey: INSTALL_SENT_KEY)
-    // SKAN state is keyed by installation id, which is stable on this host, so
-    // a value reported by an earlier run makes the next one correctly decide it
-    // has nothing new to say — the same shape as the install flag above. That
-    // is the guard working; clearing it makes the test assert the wiring rather
-    // than the history of the developer's laptop.
+    // Every SKAN key, not just the state.
+    //
+    // The state is keyed by installation id, which is stable on this host, so a
+    // value reported by an earlier run makes the next one correctly decide it
+    // has nothing new to say — the same shape as the install flag above.
+    //
+    // `advenue.skan.config` is the one that actually bit: it caches the SERVED
+    // conversion config, and a served config correctly wins over the one the
+    // app supplied. So a fetch that landed during an earlier case replaced this
+    // case's rules with the real app's, and the seam test read fine 0 for an
+    // event no rule mentioned. It failed about two runs in three, only in a
+    // full run, and only on a machine that could reach the network.
     for key in defaults?.dictionaryRepresentation().keys ?? [:].keys
-    where key.hasPrefix("advenue.skan.state.") {
+    where key.hasPrefix("advenue.skan.") {
       defaults?.removeObject(forKey: key)
     }
   }
 
+  /// Every `FacadeState` a test builds, so tearDown can stop it.
+  ///
+  /// `Advenue.shutdown()` alone was not enough and the gap was invisible: it
+  /// stops the STATIC facade, while each test here builds its own. A local
+  /// state left running keeps its consumer task, its flush timer and its SKAN
+  /// machine alive — and that machine writes to the same UserDefaults key,
+  /// which is keyed by the host's stable installation id. So a previous test
+  /// could persist SKAN state *after* the next test's setUp cleared it, and the
+  /// next machine would then correctly decide it had nothing new to say. The
+  /// seam test for SKAN failed about two runs in three, and only in a full run.
+  private var states: [FacadeState] = []
+
+  private func newState() -> FacadeState {
+    let state = FacadeState()
+    states.append(state)
+    return state
+  }
+
   override func tearDown() {
+    // Each case builds its own FacadeState, and `Advenue.shutdown()` stops only
+    // the static one — so without this every case leaks a consumer task and a
+    // repeating flush timer for the rest of the run.
+    for state in states { state.stop() }
+    states = []
     Advenue.shutdown()
+    Self.clearPersistedState()
     super.tearDown()
   }
 
   func testTrackedEventReachesTheTransport() async throws {
     let transport = RecordingTransport()
-    let state = FacadeState()
+    let state = newState()
     state.start(AdvenueConfig(apiKey: "apk_live_x"), transport: transport)
 
     // The invariant under test is the wiring, not the Keychain: an unsigned
@@ -111,7 +152,7 @@ final class SeamTests: XCTestCase {
   /// an install reaches a transport carrying what the collector gathered.
   func testInstallReachesTheTransportEnriched() async throws {
     let transport = RecordingEventTransport()
-    let state = FacadeState()
+    let state = newState()
     let sources = EnrichmentSources(
       searchAdsToken: { "tok-seam" },
       advertisingId: { (idfa: "IDFA-seam", vendorId: "VID-seam") },
@@ -144,15 +185,22 @@ final class SeamTests: XCTestCase {
   /// nothing fired, and the Android device-info collector nothing called.
   func testATrackedEventReachesTheSkanReporter() async throws {
     let reporter = RecordingSkanReporter()
-    let state = FacadeState()
+    let state = newState()
     state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.recordSkan(event: "signup", revenueMicros: nil, revenueCurrency: nil))
 
-    try await Self.until(timeout: 5) { await !reporter.calls.isEmpty }
-    let call = await reporter.calls.first
-    XCTAssertEqual(call?.fine, 10, "the tracked event never reached SKAdNetwork")
+    // The signup call, not the first call.
+    //
+    // `start()` opens a session, and a session is an app event that legitimately
+    // moves the conversion value: it matches no rule here, so it reports fine 0
+    // before signup reports 10. Asserting on `calls.first` assumed the tracked
+    // event was the only thing that could ever move the value, which made this
+    // test fail about two runs in three depending on which call won the race.
+    try await Self.until(timeout: 5) { await reporter.calls.contains { $0.fine == 10 } }
+    let call = await reporter.calls.first { $0.fine == 10 }
+    XCTAssertNotNil(call, "the tracked event never reached SKAdNetwork")
     XCTAssertEqual(call?.coarse, .low)
   }
 
@@ -160,7 +208,7 @@ final class SeamTests: XCTestCase {
   /// attribution window.
   func testRegistrationHappensAtStart() async throws {
     let reporter = RecordingSkanReporter()
-    let state = FacadeState()
+    let state = newState()
     state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
@@ -172,7 +220,7 @@ final class SeamTests: XCTestCase {
   /// life.
   func testAFailedUpdateIsRetriedOnTheNextEvent() async throws {
     let reporter = RecordingSkanReporter(failNext: true)
-    let state = FacadeState()
+    let state = newState()
     state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
@@ -191,7 +239,7 @@ final class SeamTests: XCTestCase {
   /// existing beside it.
   func testAttestationReachesTheInstallEvent() async throws {
     let transport = RecordingEventTransport()
-    let state = FacadeState()
+    let state = newState()
     let sources = EnrichmentSources(
       searchAdsToken: { nil },
       advertisingId: { (idfa: nil, vendorId: nil) },
@@ -221,7 +269,7 @@ final class SeamTests: XCTestCase {
   /// unsupported device, challenge fetch, attestKey — must ship it anyway.
   func testAFailedAttestationStillShipsTheInstall() async throws {
     let transport = RecordingEventTransport()
-    let state = FacadeState()
+    let state = newState()
     let sources = EnrichmentSources(
       searchAdsToken: { nil },
       advertisingId: { (idfa: nil, vendorId: nil) },
@@ -244,7 +292,7 @@ final class SeamTests: XCTestCase {
   /// and the server dedups on the same hash.
   func testAMetaLinkEmitsOneAemEventAndOnlyOne() async throws {
     let transport = RecordingEventTransport()
-    let state = FacadeState()
+    let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
     state.start(config, transport: transport)

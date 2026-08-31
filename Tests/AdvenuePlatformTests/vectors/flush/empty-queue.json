@@ -1,6 +1,6 @@
 {
   "name": "flushing an empty queue issues no request",
-  "source": "packages/sdk-core/src/client.ts flush() — the `queue.size === 0` guard. A timer-driven flush runs every 15 seconds forever, so an idle app must not talk to the network.",
+  "source": "retired: packages/sdk-core/src/client.ts flush() — the `queue.size === 0` guard. A timer-driven flush runs every 15 seconds forever, so an idle app must not talk to the network.",
   "kind": "flush",
   "batchSize": 3,
   "queue": [],
