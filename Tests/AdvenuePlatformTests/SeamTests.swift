@@ -19,6 +19,36 @@ actor RecordingEventTransport: EventTransport {
   func installEvent() -> ClientEvent? { events.first { $0.type == "install" } }
 }
 
+/// What the SDK told Apple. A named Sendable struct rather than a tuple: a
+/// tuple array crossing an actor boundary crashed the test process outright,
+/// which is a poor way to learn that the helper was the problem and not the SDK.
+struct SkanCall: Sendable, Equatable {
+  let fine: Int
+  let coarse: CoarseValue
+  let lock: Bool
+}
+
+/// Records what the SDK told Apple, and can be made to fail on demand.
+actor RecordingSkanReporter: SkanReporter {
+  private(set) var registered = 0
+  private(set) var calls: [SkanCall] = []
+  private var failNext: Bool
+
+  init(failNext: Bool = false) { self.failNext = failNext }
+
+  nonisolated func register() { Task { await self.noteRegistration() } }
+
+  private func noteRegistration() { registered += 1 }
+
+  func update(fine: Int, coarse: CoarseValue, lockWindow: Bool) async throws {
+    if failNext {
+      failNext = false
+      throw IngestError(status: 500)
+    }
+    calls.append(SkanCall(fine: fine, coarse: coarse, lock: lockWindow))
+  }
+}
+
 /// The test the component suites could not fail.
 ///
 /// Every piece of the send path had its own passing test — `HttpTransport.send`,
@@ -37,7 +67,17 @@ final class SeamTests: XCTestCase {
   /// assert the wiring rather than the history of the developer's laptop.
   override func setUp() {
     super.setUp()
-    UserDefaults(suiteName: ADVENUE_SUITE)?.removeObject(forKey: INSTALL_SENT_KEY)
+    let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
+    defaults?.removeObject(forKey: INSTALL_SENT_KEY)
+    // SKAN state is keyed by installation id, which is stable on this host, so
+    // a value reported by an earlier run makes the next one correctly decide it
+    // has nothing new to say — the same shape as the install flag above. That
+    // is the guard working; clearing it makes the test assert the wiring rather
+    // than the history of the developer's laptop.
+    for key in defaults?.dictionaryRepresentation().keys ?? [:].keys
+    where key.hasPrefix("advenue.skan.state.") {
+      defaults?.removeObject(forKey: key)
+    }
   }
 
   override func tearDown() {
@@ -88,6 +128,62 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(install?.adservicesToken, "tok-seam", "the Search Ads token never shipped")
     XCTAssertEqual(install?.idfa, "IDFA-seam", "the IDFA never shipped")
     XCTAssertEqual(install?.appInstanceId, "aaaaaaaabbbbbbbbccccccccdddddddd")
+  }
+
+  private func skanConfig() -> AdvenueConfig {
+    var config = AdvenueConfig(
+      apiKey: "apk_live_x",
+      conversionValues: ConversionValueConfig(
+        rules: [ConversionValueRule(fineValue: 10, events: ["signup"])]))
+    config.flushIntervalMs = 0
+    return config
+  }
+
+  /// The fourth seam. The SKAN model landed in AdvenueCore and nothing called
+  /// it — the same shape as the transport nothing constructed, the install path
+  /// nothing fired, and the Android device-info collector nothing called.
+  func testATrackedEventReachesTheSkanReporter() async throws {
+    let reporter = RecordingSkanReporter()
+    let state = FacadeState()
+    state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.recordSkan(event: "signup", revenueMicros: nil, revenueCurrency: nil))
+
+    try await Self.until(timeout: 5) { await !reporter.calls.isEmpty }
+    let call = await reporter.calls.first
+    XCTAssertEqual(call?.fine, 10, "the tracked event never reached SKAdNetwork")
+    XCTAssertEqual(call?.coarse, .low)
+  }
+
+  /// Apple wants registration at first launch; a late call loses the
+  /// attribution window.
+  func testRegistrationHappensAtStart() async throws {
+    let reporter = RecordingSkanReporter()
+    let state = FacadeState()
+    state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    try await Self.until(timeout: 5) { await reporter.registered > 0 }
+  }
+
+  /// A failed Apple call must not be confirmed: the device would refuse to send
+  /// that value again and the window would report nothing for the rest of its
+  /// life.
+  func testAFailedUpdateIsRetriedOnTheNextEvent() async throws {
+    let reporter = RecordingSkanReporter(failNext: true)
+    let state = FacadeState()
+    state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.recordSkan(event: "signup", revenueMicros: nil, revenueCurrency: nil))
+    // The first attempt throws and must leave the value unconfirmed.
+    try await Task.sleep(nanoseconds: 300_000_000)
+    state.submit(.recordSkan(event: "signup", revenueMicros: nil, revenueCurrency: nil))
+
+    try await Self.until(timeout: 5) { await !reporter.calls.isEmpty }
+    let call = await reporter.calls.first
+    XCTAssertEqual(call?.fine, 10, "an unconfirmed value was never retried")
   }
 
   /// Polls, re-flushing each round. A flush submitted while one is already in

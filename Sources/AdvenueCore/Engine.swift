@@ -73,6 +73,8 @@ public actor AdvenueEngine {
   private var pushToken: String?
   private var pushProvider: String?
   private var deviceInfo: [String: AdvenueValue]?
+  private var skan: SkanStateMachine?
+  private var skanReporter: (any SkanReporter)?
   private var flushing = false
   private var consecutiveFailures = 0
   private var backoffUntilMs: Int64 = 0
@@ -218,6 +220,49 @@ public actor AdvenueEngine {
 
   /// Device metadata attached to the install event, where Meta CAPI reads it.
   public func setDeviceInfo(_ info: [String: AdvenueValue]) { deviceInfo = info }
+
+  /// Arms SKAN. Without a conversion-value config there is nothing to report,
+  /// so the machine is not built at all rather than built and idle.
+  ///
+  /// The machine is constructed **here**, on the actor, from Sendable
+  /// ingredients. Building it outside and passing it in is what Swift 6 refuses
+  /// — it holds the store, which belongs to this actor — and the refusal is
+  /// correct rather than something to silence with @unchecked.
+  public func enableSkan(
+    mapper: ConversionValueMapper,
+    currency: String?,
+    installationId: String,
+    reporter: any SkanReporter
+  ) {
+    skan = SkanStateMachine(
+      store: store, clock: clock, installationId: installationId,
+      mapper: mapper, currency: currency)
+    skanReporter = reporter
+    reporter.register()
+  }
+
+  /// Feeds SKAN and reports if the value moved.
+  ///
+  /// `confirm` runs only after the reporter returns without throwing. A device
+  /// that recorded a value it never sent would refuse to send it again, and
+  /// that window would report nothing for the rest of its life.
+  public func recordSkan(
+    event: String?, revenueMicros: String? = nil, revenueCurrency: String? = nil
+  ) async {
+    guard let skan, let reporter = skanReporter else { return }
+    guard let update = skan.record(
+      event: event, revenueMicros: revenueMicros, revenueCurrency: revenueCurrency)
+    else { return }
+
+    do {
+      try await reporter.update(
+        fine: update.fineValue, coarse: update.coarseValue, lockWindow: update.lockWindow)
+      skan.confirm(update)
+    } catch {
+      skan.abandon(update)
+      onError("skan.update", error)
+    }
+  }
 
   /// Registers the device's push token for uninstall measurement (#26).
   ///
@@ -377,6 +422,10 @@ public enum Command: Sendable {
   case setConsentData(Consent?)
   case setPushToken(token: String?, provider: String?)
   case setDeviceInfo([String: AdvenueValue])
+  case recordSkan(event: String?, revenueMicros: String?, revenueCurrency: String?)
+  case enableSkan(
+    mapper: ConversionValueMapper, currency: String?, installationId: String,
+    reporter: any SkanReporter)
   case trackInstall(adservicesToken: String?)
 }
 
@@ -443,6 +492,12 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setPushToken(token, provider: provider)
     case .setDeviceInfo(let info):
       await engine.setDeviceInfo(info)
+    case .recordSkan(let event, let micros, let currency):
+      await engine.recordSkan(event: event, revenueMicros: micros, revenueCurrency: currency)
+    case .enableSkan(let mapper, let currency, let installationId, let reporter):
+      await engine.enableSkan(
+        mapper: mapper, currency: currency, installationId: installationId,
+        reporter: reporter)
     }
   }
 

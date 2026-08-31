@@ -21,6 +21,11 @@ public struct AdvenueConfig: Sendable {
   /// the server accepts unless the app enforces signatures.
   public var signingSecret: String?
 
+  /// SKAdNetwork conversion values. Absent means SKAN is not armed at all —
+  /// there is nothing to report without rules, so the machine is not built
+  /// rather than built and idle.
+  public var conversionValues: ConversionValueConfig?
+
   /// Called when the SDK swallows a best-effort failure. Never receives PII.
   public var onError: @Sendable (String, any Error) -> Void
 
@@ -33,6 +38,7 @@ public struct AdvenueConfig: Sendable {
     batchSize: Int = 20,
     flushIntervalMs: Int = 15_000,
     signingSecret: String? = nil,
+    conversionValues: ConversionValueConfig? = nil,
     onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in }
   ) {
     self.apiKey = apiKey
@@ -43,6 +49,7 @@ public struct AdvenueConfig: Sendable {
     self.batchSize = batchSize
     self.flushIntervalMs = flushIntervalMs
     self.signingSecret = signingSecret
+    self.conversionValues = conversionValues
     self.onError = onError
   }
 }

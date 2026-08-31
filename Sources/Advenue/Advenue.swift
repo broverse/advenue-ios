@@ -23,6 +23,14 @@ public enum Advenue {
   /// Records an event. Synchronous, non-blocking and ordered.
   public static func track(_ name: String, properties: [String: AdvenueValue]? = nil) {
     state.submit(.track(name: name, properties: properties, type: "custom"))
+    // SKAN sees every tracked event: a conversion rule can name any of them.
+    state.submit(.recordSkan(event: name, revenueMicros: nil, revenueCurrency: nil))
+  }
+
+  /// Reports revenue to SKAdNetwork, in canonical micros. A string rather than
+  /// a number because money must not go through a Double.
+  public static func recordSkanRevenue(micros: String, currency: String) {
+    state.submit(.recordSkan(event: nil, revenueMicros: micros, revenueCurrency: currency))
   }
 
   public static func setUserId(_ id: String?) { state.submit(.setUserId(id)) }
@@ -154,7 +162,8 @@ final class FacadeState: @unchecked Sendable {
   func start(
     _ config: AdvenueConfig,
     transport: (any EventTransport)? = nil,
-    sources: EnrichmentSources? = nil
+    sources: EnrichmentSources? = nil,
+    skan: (any SkanReporter)? = nil
   ) {
     // Replace-and-shut-down, never add.
     stop()
@@ -199,6 +208,22 @@ final class FacadeState: @unchecked Sendable {
       transport: eventTransport,
       onError: config.onError)
     let pipe = CommandPipe(engine: engine, onError: config.onError)
+
+    // Armed only when there are rules to evaluate. The reporter is injectable
+    // for the same reason the transport is: an unwired one is invisible, and
+    // that shape has already cost this SDK three defects.
+    if let rules = config.conversionValues, let mapper = try? ConversionValueMapper(rules) {
+      // Submitted through the pipe, not a bare Task. The pipe is ordered, so
+      // arming lands ahead of anything the app tracks after initialize returns.
+      // A Task raced them, and an event tracked in that window reached the
+      // engine before SKAN existed and was silently dropped — a real app calls
+      // initialize and then tracks immediately.
+      pipe.submit(
+        .enableSkan(
+          mapper: mapper, currency: rules.revenueCurrency,
+          installationId: installationId,
+          reporter: skan ?? StoreKitSkanReporter(onError: config.onError)))
+    }
 
     lock.lock()
     self.store = store
