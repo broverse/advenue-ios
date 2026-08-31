@@ -50,6 +50,25 @@ final class MutableClock: Clock, @unchecked Sendable {
   func nowMs() -> Int64 { ms }
 }
 
+/// Minimal lock box so a test closure can accumulate across concurrency
+/// domains under Swift 6 checking. Duplicated from the platform test target
+/// because XCTest targets do not share code.
+final class Locked<T>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: T
+  init(_ value: T) { storage = value }
+  var value: T {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+  func mutate(_ body: (inout T) -> Void) {
+    lock.lock()
+    body(&storage)
+    lock.unlock()
+  }
+}
+
 final class SequentialUUIDs: UUIDSource, @unchecked Sendable {
   private var n = 0
   private let prefix: String

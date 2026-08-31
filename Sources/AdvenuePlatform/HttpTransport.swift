@@ -17,7 +17,7 @@ public let MAX_BATCH_SIZE = 100
 /// Throws `IngestError` on a non-2xx so the caller can distinguish a transient
 /// failure from a poison payload; a transport failure maps to 408, matching
 /// sdk-core so both SDKs retry exactly the same cases.
-public struct HttpTransport: Sendable {
+public struct HttpTransport: EventTransport, Sendable {
   private let endpoint: String
   private let apiKey: String
   private let signingSecret: String?

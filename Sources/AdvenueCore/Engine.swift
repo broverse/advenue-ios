@@ -11,13 +11,21 @@ public struct EngineConfig: Sendable {
   public var requireConsent: Bool
   public var sessionWindowMs: Int64
   public var maxQueueSize: Int
+  /// Events per request, and the threshold at which `track` flushes eagerly.
+  public var batchSize: Int
+  public var retryBaseMs: Double
+  public var retryCapMs: Double
 
   public init(
     apiKey: String, platform: String, deviceId: String, installationId: String? = nil,
     appVersion: String? = nil, osVersion: String? = nil, sdkVersion: String? = nil,
     requireConsent: Bool = false, sessionWindowMs: Int64 = DEFAULT_SESSION_WINDOW_MS,
-    maxQueueSize: Int = 10_000
+    maxQueueSize: Int = 10_000, batchSize: Int = 20,
+    retryBaseMs: Double = 1_000, retryCapMs: Double = 60_000
   ) {
+    self.batchSize = batchSize
+    self.retryBaseMs = retryBaseMs
+    self.retryCapMs = retryCapMs
     self.apiKey = apiKey
     self.platform = platform
     self.deviceId = deviceId
@@ -47,10 +55,16 @@ public actor AdvenueEngine {
   private let queue: EventQueue
   private let sessions: SessionTracker
   private let onError: @Sendable (String, any Error) -> Void
+  private let transport: (any EventTransport)?
+  private let onDrop: @Sendable ([ClientEvent]) -> Void
+  private let random: @Sendable () -> Double
 
   private var consent: Bool
   private var forgotten = false
   private var customerUserId: String?
+  private var flushing = false
+  private var consecutiveFailures = 0
+  private var backoffUntilMs: Int64 = 0
 
   public init(
     config: EngineConfig,
@@ -58,12 +72,18 @@ public actor AdvenueEngine {
     clock: Clock,
     scheduler: Scheduler,
     uuid: UUIDSource,
+    transport: (any EventTransport)? = nil,
+    onDrop: @escaping @Sendable ([ClientEvent]) -> Void = { _ in },
+    random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
     onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in }
   ) {
     self.config = config
     self.store = store
     self.clock = clock
     self.uuid = uuid
+    self.transport = transport
+    self.onDrop = onDrop
+    self.random = random
     self.onError = onError
     self.queue = EventQueue(store: store, maxSize: config.maxQueueSize, scheduler: scheduler)
     self.sessions = SessionTracker(
@@ -142,6 +162,69 @@ public actor AdvenueEngine {
   public func pendingEventIds() -> [String] {
     queue.peek(Int.max).map(\.id)
   }
+
+  /// Uploads buffered events. No-op when empty, re-entrancy guarded, and never
+  /// throws — a timer-driven call is unawaited, so a transient failure simply
+  /// leaves the batch buffered for the next attempt.
+  public func flush() async {
+    guard let transport else { return }
+    if flushing || queue.size == 0 || clock.nowMs() < backoffUntilMs { return }
+    flushing = true
+    defer { flushing = false }
+
+    let events = queue.peek(config.batchSize)
+    if events.isEmpty { return }
+
+    do {
+      try await transport.send(events)
+    } catch {
+      if let ingest = error as? IngestError, !ingest.isRetryable {
+        // Poison payload. Ingest parses a batch as a whole and answers one 400
+        // for all of it, so the offender has to be found rather than the batch
+        // discarded. A 4xx is not an outage, so it does not arm the backoff.
+        onError("flush.poison", error)
+        await isolatePoison(events, transport)
+      } else {
+        // Transient (network, 5xx, 429): keep the batch and back off, so a
+        // fleet recovering from an outage does not retry in lockstep.
+        onError("flush.transport", error)
+        armBackoff()
+      }
+      return
+    }
+
+    queue.ack(events)
+    consecutiveFailures = 0
+    backoffUntilMs = 0
+  }
+
+  /// Re-sends a rejected batch one event at a time so a single poison event is
+  /// dropped while the rest are delivered or kept. Stops at the first transient
+  /// error, so a network drop mid-isolation cannot turn deliverable events into
+  /// dropped ones.
+  private func isolatePoison(_ events: [ClientEvent], _ transport: any EventTransport) async {
+    for event in events {
+      do {
+        try await transport.send([event])
+        queue.ack([event])
+      } catch {
+        guard let ingest = error as? IngestError, !ingest.isRetryable else { return }
+        queue.ack([event])
+        onDrop([event])
+      }
+    }
+  }
+
+  private func armBackoff() {
+    consecutiveFailures += 1
+    let delay = backoffDelayMs(
+      failures: consecutiveFailures, baseMs: config.retryBaseMs,
+      capMs: config.retryCapMs, random: random())
+    backoffUntilMs = clock.nowMs() + Int64(delay)
+  }
+
+  /// Test surface: the `flush/` vectors assert that a 4xx leaves this at zero.
+  public func consecutiveFailureCount() -> Int { consecutiveFailures }
 }
 
 /// A command submitted to the engine through the ordered ingress.
