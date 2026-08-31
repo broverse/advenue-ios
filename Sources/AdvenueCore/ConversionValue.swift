@@ -174,6 +174,35 @@ public func microsLess(_ lhs: String, _ rhs: String) -> Bool {
   lhs.count != rhs.count ? lhs.count < rhs.count : lhs < rhs
 }
 
+/// Parses a non-negative decimal amount ("9.99") into exact millionths,
+/// returning nil for anything that is not one. Digit-string arithmetic, not
+/// `Double`: at 2^53 a Double can no longer count, and below that it cannot
+/// represent 0.07 — both failures misprice a conversion by real money.
+///
+/// The grammar matches `decimalToMicros` in `@advenue/skadnetwork`: no leading
+/// zeros, at most six fractional places, no sign and no exponent.
+public func decimalToMicros(_ amount: String) -> String? {
+  guard !amount.isEmpty, amount.allSatisfy(\.isASCII) else { return nil }
+  let parts = amount.split(separator: ".", omittingEmptySubsequences: false)
+  guard parts.count <= 2 else { return nil }
+  let whole = String(parts[0])
+  let fraction = parts.count == 2 ? String(parts[1]) : ""
+
+  guard !whole.isEmpty, whole.allSatisfy(\.isNumber) else { return nil }
+  guard whole == "0" || whole.first != "0" else { return nil }
+  if parts.count == 2 {
+    guard !fraction.isEmpty, fraction.count <= 6, fraction.allSatisfy(\.isNumber) else {
+      return nil
+    }
+  }
+
+  let digits = whole + fraction.padding(toLength: 6, withPad: "0", startingAt: 0)
+  // Canonicalise: "0.000001" produces "0000001", and the queue's exact
+  // comparison is defined only on values with no leading zeros.
+  let trimmed = String(digits.drop(while: { $0 == "0" }))
+  return trimmed.isEmpty ? "0" : trimmed
+}
+
 /// No leading zeros except "0" itself, digits only — the same shape the server
 /// accepts, so a value that passes here cannot be rejected there.
 func isCanonicalMicros(_ value: String) -> Bool {

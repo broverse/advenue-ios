@@ -37,8 +37,38 @@ public enum Advenue {
     state.submit(.recordSkan(event: nil, revenueMicros: micros, revenueCurrency: currency))
   }
 
+  /// Reports revenue as the decimal amount a StoreKit price is quoted in
+  /// ("9.99"), converted to exact micros here. Returns false — recording
+  /// nothing — for an amount that is not a non-negative decimal with at most
+  /// six places; coercing a malformed one to zero would report a conversion
+  /// value the purchase did not earn.
+  @discardableResult
+  public static func recordSkanRevenue(amount: String, currency: String) -> Bool {
+    guard let micros = decimalToMicros(amount) else { return false }
+    recordSkanRevenue(micros: micros, currency: currency)
+    return true
+  }
+
   public static func setUserId(_ id: String?) { state.submit(.setUserId(id)) }
-  public static func setConsent(_ granted: Bool) { state.submit(.setConsent(granted)) }
+
+  public static func setConsent(_ granted: Bool) {
+    state.rememberConsent(granted)
+    state.submit(.setConsent(granted))
+  }
+
+  /// Whether tracking consent is currently granted. Persisted, so this is the
+  /// answer after a restart too — a caller that defaulted to false on every
+  /// cold start would silently discard a preference the user gave.
+  public static func trackingConsent() -> Bool { state.trackingConsent }
+
+  /// The granular DMA consent last set, or nil if none has been.
+  public static func consentData() -> Consent? { state.consentData }
+
+  /// The Firebase App Instance ID, when the app resolves it itself rather than
+  /// through `AdvenueFirebase`. Does not disturb the advertising identity.
+  public static func setAppInstanceId(_ id: String?) {
+    state.submit(.setAppInstanceId(id))
+  }
 
   /// Granular ad-platform consent (Google DMA), forwarded by server-side
   /// postbacks as gdpr_applies / ad_user_data / ad_personalization / ad_storage.
@@ -47,6 +77,7 @@ public enum Advenue {
   /// "denied", and inventing false on their behalf records a refusal that never
   /// happened.
   public static func setConsentData(_ consent: Consent?) {
+    state.rememberConsentData(consent)
     state.submit(.setConsentData(consent))
   }
 
@@ -160,6 +191,12 @@ final class FacadeState: @unchecked Sendable {
   private var seenAemUrlHashes: Set<String> = []
   private var appInstanceIdProvider: (@Sendable () async -> String?)?
   private var flushTimer: DispatchSourceTimer?
+  /// Read caches for the two consent values. The engine owns persistence; these
+  /// exist so a synchronous getter can answer without a round trip through the
+  /// pipe, and so a caller reading back its own `setConsent` never sees the
+  /// value it just replaced.
+  private var consentMirror = false
+  private var consentDataMirror: Consent?
 
   /// `transport` is a parameter, not a hidden construction, because an unwired
   /// transport is otherwise invisible: every component of the send path can be
@@ -261,6 +298,10 @@ final class FacadeState: @unchecked Sendable {
     lock.lock()
     self.store = store
     self.secure = secure
+    // Seeded from the same persisted values the engine loads, so consent
+    // granted in a previous run is still granted after a cold start.
+    self.consentMirror = store.string(forKey: CONSENT_KEY) == "granted"
+    self.consentDataMirror = readPersistedConsentData(store)
     self.pipe = pipe
     self.resolvedDeviceId = deviceId
     let buffered = pendingDeepLinks
@@ -344,6 +385,10 @@ final class FacadeState: @unchecked Sendable {
   func forgetMe() {
     submit(.forgetMe)
     lock.lock()
+    // Erasure clears the read caches too: a getter still answering "granted"
+    // after forgetMe would report a consent the device no longer holds.
+    consentMirror = false
+    consentDataMirror = nil
     let secure = self.secure
     let store = self.store
     resolvedDeviceId = nil
@@ -358,6 +403,30 @@ final class FacadeState: @unchecked Sendable {
   /// because deferred identity will eventually wait for first unlock, and
   /// changing that signature later would break every caller.
   var resolvedAppId: String? { acceptedAppId.current }
+
+  var trackingConsent: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return consentMirror
+  }
+
+  var consentData: Consent? {
+    lock.lock()
+    defer { lock.unlock() }
+    return consentDataMirror
+  }
+
+  func rememberConsent(_ granted: Bool) {
+    lock.lock()
+    consentMirror = granted
+    lock.unlock()
+  }
+
+  func rememberConsentData(_ consent: Consent?) {
+    lock.lock()
+    consentDataMirror = consent
+    lock.unlock()
+  }
 
   private func lookupTarget() -> (AdvenueConfig, String)? {
     lock.lock()

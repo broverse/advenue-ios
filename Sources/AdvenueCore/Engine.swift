@@ -108,7 +108,7 @@ public actor AdvenueEngine {
     self.sessions = SessionTracker(
       store: store, clock: clock, windowMs: config.sessionWindowMs, uuid: uuid)
     self.consent = store.string(forKey: CONSENT_KEY) == "granted"
-    self.consentData = Self.readConsentData(store)
+    self.consentData = readPersistedConsentData(store)
   }
 
   /// Enqueues an event, or refuses it and says why. Returns whether it was
@@ -154,6 +154,14 @@ public actor AdvenueEngine {
     self.idfa = idfa
     self.vendorId = vendorId
     self.appInstanceId = appInstanceId
+  }
+
+  /// The Firebase App Instance ID alone. Separate from `setIdentity` because it
+  /// arrives on its own schedule — an app can set it at any point, and folding
+  /// it into the three-field setter would clear the advertising identity the
+  /// install enrichment resolved.
+  public func setAppInstanceId(_ id: String?) {
+    appInstanceId = id
   }
 
   /// The first-open event, at most once per installation. Returns whether it
@@ -322,11 +330,6 @@ public actor AdvenueEngine {
     pushProvider = provider ?? (config.platform == "android" ? "fcm" : "apns")
   }
 
-  private static func readConsentData(_ store: KeyValueStore) -> Consent? {
-    guard let raw = store.string(forKey: CONSENT_DATA_KEY), let data = raw.data(using: .utf8)
-    else { return nil }
-    return try? JSONDecoder().decode(Consent.self, from: data)
-  }
 
   public func setUserId(_ id: String?) {
     customerUserId = id
@@ -455,6 +458,7 @@ public enum Command: Sendable {
   case background
   case flush
   case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?)
+  case setAppInstanceId(String?)
   case setConsentData(Consent?)
   case setPushToken(token: String?, provider: String?)
   case setDeviceInfo([String: AdvenueValue])
@@ -521,6 +525,8 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.flush()
     case .setIdentity(let idfa, let vendorId, let appInstanceId):
       await engine.setIdentity(idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId)
+    case .setAppInstanceId(let id):
+      await engine.setAppInstanceId(id)
     case .trackInstall(let token, let attestation, let challenge):
       await engine.trackInstall(
         adservicesToken: token, attestation: attestation, attestationChallenge: challenge)
@@ -549,4 +555,13 @@ public final class CommandPipe: @unchecked Sendable {
     continuation.finish()
     consumer = nil
   }
+}
+
+/// Decodes the persisted DMA consent. Public because the platform facade
+/// answers `consentData()` from the same bytes the engine loads — two decoders
+/// would be two chances to disagree about what the device consented to.
+public func readPersistedConsentData(_ store: KeyValueStore) -> Consent? {
+  guard let raw = store.string(forKey: CONSENT_DATA_KEY), let data = raw.data(using: .utf8)
+  else { return nil }
+  return try? JSONDecoder().decode(Consent.self, from: data)
 }

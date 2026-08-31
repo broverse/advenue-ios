@@ -144,6 +144,29 @@ final class ConversionValueTests: XCTestCase {
     }
   }
 
+  /// The React Native bridge hands over the app's price string ("9.99"), not
+  /// micros. Converting it in JavaScript would put a money computation back in
+  /// the layer this release is emptying, so the conversion lives here — and it
+  /// must be exact: `Double("0.07") * 1_000_000` is 69999.999…, which truncates
+  /// to a cent less than the user paid.
+  func testDecimalAmountsConvertToExactMicros() {
+    XCTAssertEqual(decimalToMicros("0"), "0")
+    XCTAssertEqual(decimalToMicros("9.99"), "9990000")
+    XCTAssertEqual(decimalToMicros("0.07"), "70000")
+    XCTAssertEqual(decimalToMicros("0.000001"), "1")
+    XCTAssertEqual(decimalToMicros("12"), "12000000")
+    // Past 2^53, where a Double stops being able to count.
+    XCTAssertEqual(decimalToMicros("9007199254.740993"), "9007199254740993")
+  }
+
+  /// A malformed amount is refused rather than coerced. A silently-zeroed
+  /// purchase reports a conversion value that never happened.
+  func testMalformedAmountsAreRefused() {
+    for bad in ["", "-1", "1.2345678", "01", " 1", "1e6", "1.", ".5", "abc"] {
+      XCTAssertNil(decimalToMicros(bad), "amount \"\(bad)\" must be refused")
+    }
+  }
+
   func testMalformedCurrenciesAreRejected() {
     for bad in ["usd", "US", "USDD", "US1"] {
       XCTAssertThrowsError(

@@ -69,6 +69,24 @@ final class InstallTests: XCTestCase {
     XCTAssertEqual(events.first?.appInstanceId, "abc")
   }
 
+  /// The React Native facade exposes `setAppInstanceId` as its own call, and
+  /// Firebase resolves the id long after the install enrichment has already set
+  /// the advertising identity. Routing it through `setIdentity` would clear the
+  /// IDFA and the vendor id every time an app called it — attribution inputs
+  /// erased by a diagnostics field.
+  func testSettingTheAppInstanceIdKeepsTheAdvertisingIdentity() async {
+    let store = MemoryStore()
+    let e = engine(store)
+    await e.setIdentity(idfa: "IDFA-1", vendorId: "VID-1", appInstanceId: nil)
+    await e.setAppInstanceId("fb-123")
+    await e.track("purchase")
+
+    let events = await e.pendingEvents()
+    XCTAssertEqual(events.first?.idfa, "IDFA-1")
+    XCTAssertEqual(events.first?.vendorId, "VID-1")
+    XCTAssertEqual(events.first?.appInstanceId, "fb-123")
+  }
+
   /// The AdServices token belongs to the install alone: it is an attribution
   /// input, not a per-event property, and repeating it on every event would put
   /// an opaque token in every request for nothing.
