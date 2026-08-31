@@ -237,6 +237,7 @@ final class FacadeState: @unchecked Sendable {
         .setIdentity(
           idfa: enrichment.idfa, vendorId: enrichment.vendorId,
           appInstanceId: enrichment.appInstanceId))
+      self?.submit(.setDeviceInfo(collectDeviceInfo()))
       self?.submit(.trackInstall(adservicesToken: enrichment.adservicesToken))
       self?.submit(.flush)
     }

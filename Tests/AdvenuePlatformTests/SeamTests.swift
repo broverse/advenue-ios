@@ -58,7 +58,7 @@ final class SeamTests: XCTestCase {
     state.submit(.track(name: "purchase", properties: nil, type: "custom"))
     state.submit(.flush)
 
-    try await Self.until(timeout: 3) { await !transport.seen.isEmpty }
+    try await Self.until(timeout: 5, state: state) { await !transport.seen.isEmpty }
     let seen = await transport.seen
     XCTAssertTrue(
       seen.flatMap { $0 }.contains("purchase"),
@@ -82,7 +82,7 @@ final class SeamTests: XCTestCase {
     state.start(config, transport: transport, sources: sources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
-    try await Self.until(timeout: 5) { await transport.installEvent() != nil }
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
     let install = await transport.installEvent()
 
     XCTAssertEqual(install?.adservicesToken, "tok-seam", "the Search Ads token never shipped")
@@ -90,14 +90,18 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(install?.appInstanceId, "aaaaaaaabbbbbbbbccccccccdddddddd")
   }
 
-  /// Polls rather than sleeping a fixed interval: the pipe is asynchronous, and
-  /// a fixed sleep is either flaky or slow.
+  /// Polls, re-flushing each round. A flush submitted while one is already in
+  /// flight is a no-op by design — the re-entrancy guard — so a single Flush is
+  /// not enough to drain a queue that grew while the first request was out. In
+  /// a shipping app the 15-second timer covers this.
   private static func until(
-    timeout: TimeInterval, _ condition: @Sendable () async -> Bool
+    timeout: TimeInterval, state: FacadeState? = nil,
+    _ condition: @Sendable () async -> Bool
   ) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
       if await condition() { return }
+      state?.submit(.flush)
       try await Task.sleep(nanoseconds: 20_000_000)
     }
     XCTFail("condition never became true within \(timeout)s")

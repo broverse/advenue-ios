@@ -72,6 +72,7 @@ public actor AdvenueEngine {
   private var consentData: Consent?
   private var pushToken: String?
   private var pushProvider: String?
+  private var deviceInfo: [String: AdvenueValue]?
   private var flushing = false
   private var consecutiveFailures = 0
   private var backoffUntilMs: Int64 = 0
@@ -156,7 +157,9 @@ public actor AdvenueEngine {
   /// the backend dedup window absorbs — a permanently missing install is the
   /// worse failure.
   @discardableResult
-  public func trackInstall(adservicesToken: String?) -> Bool {
+  public func trackInstall(
+    adservicesToken: String?, properties: [String: AdvenueValue]? = nil
+  ) -> Bool {
     if forgotten || (config.requireConsent && !consent) { return false }
     if store.string(forKey: INSTALL_SENT_KEY) == "1" { return false }
 
@@ -178,6 +181,13 @@ public actor AdvenueEngine {
     event.pushProvider = pushProvider
     // Install-only: an attribution input, not a per-event property.
     event.adservicesToken = adservicesToken
+    // Merged rather than replacing: a caller-supplied property of the same name
+    // is the app's own and wins.
+    if let deviceInfo {
+      event.properties = deviceInfo.merging(properties ?? [:]) { _, caller in caller }
+    } else {
+      event.properties = properties
+    }
     queue.enqueue(event)
 
     store.set("1", forKey: INSTALL_SENT_KEY)
@@ -205,6 +215,9 @@ public actor AdvenueEngine {
   }
 
   public func getConsentData() -> Consent? { consentData }
+
+  /// Device metadata attached to the install event, where Meta CAPI reads it.
+  public func setDeviceInfo(_ info: [String: AdvenueValue]) { deviceInfo = info }
 
   /// Registers the device's push token for uninstall measurement (#26).
   ///
@@ -363,6 +376,7 @@ public enum Command: Sendable {
   case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?)
   case setConsentData(Consent?)
   case setPushToken(token: String?, provider: String?)
+  case setDeviceInfo([String: AdvenueValue])
   case trackInstall(adservicesToken: String?)
 }
 
@@ -427,6 +441,8 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setConsentData(consent)
     case .setPushToken(let token, let provider):
       await engine.setPushToken(token, provider: provider)
+    case .setDeviceInfo(let info):
+      await engine.setDeviceInfo(info)
     }
   }
 
