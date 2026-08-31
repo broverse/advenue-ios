@@ -39,6 +39,10 @@ public struct EngineConfig: Sendable {
   }
 }
 
+/// Dies with the app; guards the one-per-install first-open event. Lives in the
+/// core because the engine owns the guard — the Keychain is deliberately never
+/// consulted for it, since a durable flag would suppress legitimate reinstalls.
+public let INSTALL_SENT_KEY = "advenue.install_sent"
 public let CONSENT_KEY = "advenue.consent"
 public let CONSENT_DATA_KEY = "advenue.consent_data"
 public let USER_ID_KEY = "advenue.user_id"
@@ -62,6 +66,9 @@ public actor AdvenueEngine {
   private var consent: Bool
   private var forgotten = false
   private var customerUserId: String?
+  private var idfa: String?
+  private var vendorId: String?
+  private var appInstanceId: String?
   private var flushing = false
   private var consecutiveFailures = 0
   private var backoffUntilMs: Int64 = 0
@@ -113,8 +120,52 @@ public actor AdvenueEngine {
     event.osVersion = config.osVersion
     event.sdkVersion = config.sdkVersion
     event.customerUserId = customerUserId
+    event.idfa = idfa
+    event.vendorId = vendorId
+    event.appInstanceId = appInstanceId
     event.properties = properties
     queue.enqueue(event)
+    return true
+  }
+
+  /// Identity attached to every subsequent event. Not persisted: it is
+  /// re-resolved each launch, because ATT status and the vendor id can both
+  /// change between them.
+  public func setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?) {
+    self.idfa = idfa
+    self.vendorId = vendorId
+    self.appInstanceId = appInstanceId
+  }
+
+  /// The first-open event, at most once per installation. Returns whether it
+  /// was recorded.
+  ///
+  /// Ordering is deliberate. The consent gate comes first, so a refused install
+  /// leaves no flag and can still fire once consent arrives. The flag is
+  /// written last, so a crash between the event and the flag costs a duplicate
+  /// the backend dedup window absorbs — a permanently missing install is the
+  /// worse failure.
+  @discardableResult
+  public func trackInstall(adservicesToken: String?) -> Bool {
+    if forgotten || (config.requireConsent && !consent) { return false }
+    if store.string(forKey: INSTALL_SENT_KEY) == "1" { return false }
+
+    var event = ClientEvent(
+      id: uuid.next(), deviceId: config.deviceId, type: "install", name: "install",
+      timestamp: EventEncoding.iso8601(ms: clock.nowMs()), platform: config.platform)
+    event.installationId = config.installationId
+    event.appVersion = config.appVersion
+    event.osVersion = config.osVersion
+    event.sdkVersion = config.sdkVersion
+    event.customerUserId = customerUserId
+    event.idfa = idfa
+    event.vendorId = vendorId
+    event.appInstanceId = appInstanceId
+    // Install-only: an attribution input, not a per-event property.
+    event.adservicesToken = adservicesToken
+    queue.enqueue(event)
+
+    store.set("1", forKey: INSTALL_SENT_KEY)
     return true
   }
 
@@ -162,6 +213,9 @@ public actor AdvenueEngine {
   public func pendingEventIds() -> [String] {
     queue.peek(Int.max).map(\.id)
   }
+
+  /// Test surface: the ids alone cannot say what a field carries.
+  public func pendingEvents() -> [ClientEvent] { queue.peek(Int.max) }
 
   /// Uploads buffered events. No-op when empty, re-entrancy guarded, and never
   /// throws — a timer-driven call is unawaited, so a transient failure simply
@@ -236,6 +290,8 @@ public enum Command: Sendable {
   case foreground
   case background
   case flush
+  case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?)
+  case trackInstall(adservicesToken: String?)
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -291,6 +347,10 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.notifyBackground()
     case .flush:
       await engine.flush()
+    case .setIdentity(let idfa, let vendorId, let appInstanceId):
+      await engine.setIdentity(idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId)
+    case .trackInstall(let token):
+      await engine.trackInstall(adservicesToken: token)
     }
   }
 

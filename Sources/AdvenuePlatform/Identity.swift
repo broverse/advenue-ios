@@ -5,8 +5,6 @@ import Foundation
 public let DEVICE_ID_KEY = "advenue.device_id"
 /// Dies with the app — UserDefaults.
 public let INSTALLATION_ID_KEY = "advenue.installation_id"
-/// Dies with the app; guards the one-per-install first-open event.
-public let INSTALL_SENT_KEY = "advenue.install_sent"
 
 public enum IdentityResolution: Equatable, Sendable {
   case resolved(deviceId: String, installationId: String)
