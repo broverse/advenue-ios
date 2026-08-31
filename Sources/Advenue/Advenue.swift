@@ -90,7 +90,11 @@ final class FacadeState: @unchecked Sendable {
   /// `transport` is a parameter, not a hidden construction, because an unwired
   /// transport is otherwise invisible: every component of the send path can be
   /// green while nothing joins them. `SeamTests` injects a recorder here.
-  func start(_ config: AdvenueConfig, transport: (any EventTransport)? = nil) {
+  func start(
+    _ config: AdvenueConfig,
+    transport: (any EventTransport)? = nil,
+    sources: EnrichmentSources? = nil
+  ) {
     // Replace-and-shut-down, never add.
     stop()
 
@@ -157,6 +161,27 @@ final class FacadeState: @unchecked Sendable {
       flushTimer = timer
       lock.unlock()
     }
+
+    // Enrichment, then the install, off the caller's thread. `initialize`
+    // returns synchronously — an SDK that blocks
+    // didFinishLaunchingWithOptions for three seconds is one nobody ships.
+    let installSources =
+      sources ?? EnrichmentSources.system(appInstanceIdProvider: currentAppInstanceIdProvider)
+    Task { [weak self] in
+      let enrichment = await collectEnrichment(installSources, deadlineMs: INSTALL_WINDOW_MS)
+      self?.submit(
+        .setIdentity(
+          idfa: enrichment.idfa, vendorId: enrichment.vendorId,
+          appInstanceId: enrichment.appInstanceId))
+      self?.submit(.trackInstall(adservicesToken: enrichment.adservicesToken))
+      self?.submit(.flush)
+    }
+  }
+
+  private var currentAppInstanceIdProvider: (@Sendable () async -> String?)? {
+    lock.lock()
+    defer { lock.unlock() }
+    return appInstanceIdProvider
   }
 
   func submit(_ command: Command) {
