@@ -3,6 +3,10 @@ import Foundation
 
 #if os(iOS)
   import StoreKit
+
+  #if canImport(AdAttributionKit)
+    import AdAttributionKit
+  #endif
 #endif
 
 /// SKAdNetwork through StoreKit.
@@ -16,16 +20,48 @@ import Foundation
 /// and compiles happily before failing on the symbol: StoreKit is there, SKAN
 /// is not.
 ///
-/// **The simulator implements all of this as a no-op that reports success.** A
-/// simulator test of this type therefore asserts nothing about Apple; what the
-/// tests here settle is the availability decision and the coarse mapping. That
-/// a postback actually arrives carrying the value is a device claim, and it is
-/// on the checklist rather than implied here.
+/// **What a simulator does here, measured rather than assumed:** it does NOT
+/// silently succeed. `updatePostbackConversionValue` answers
+/// `SKANErrorDomain 10` when there is no ad impression to attach a value to,
+/// which is also what a real device with no impression does. So the simulator
+/// exercises the SDK's degradation path for real — the caller abandons the
+/// value and reports it — and that is worth more than the no-op this comment
+/// originally claimed.
+///
+/// What it still cannot settle is the success path: that a postback arrives
+/// carrying the value we sent needs a device with a signed impression, and it
+/// is on the checklist rather than implied here.
 public struct StoreKitSkanReporter: SkanReporter {
   private let onError: @Sendable (String, any Error) -> Void
+  private let adAttributionUpdate: @Sendable (Int, CoarseValue, Bool) async throws -> Void
 
-  public init(onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in }) {
+  public init(
+    onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in },
+    adAttributionUpdate: (@Sendable (Int, CoarseValue, Bool) async throws -> Void)? = nil
+  ) {
     self.onError = onError
+    self.adAttributionUpdate = adAttributionUpdate ?? Self.systemAdAttributionUpdate
+  }
+
+  /// AdAttributionKit, iOS 17.4+. An impression may be signed for either rail,
+  /// so both are updated rather than one chosen.
+  ///
+  /// Injectable because the invariant that matters cannot otherwise be tested:
+  /// a failure here is **expected** whenever no AAK-signed impression exists,
+  /// and it must not fail the SKAN update. If it did, a device with only a
+  /// SKAN-signed impression would never confirm its value and that window would
+  /// report nothing for the rest of its life.
+  @Sendable
+  private static func systemAdAttributionUpdate(
+    fine: Int, coarse: CoarseValue, lockWindow: Bool
+  ) async throws {
+    #if os(iOS) && canImport(AdAttributionKit)
+      if #available(iOS 17.4, *) {
+        try await Postback.updateConversionValue(
+          fine, coarseConversionValue: coarse.adAttributionValue,
+          lockPostback: lockWindow)
+      }
+    #endif
   }
 
   public func register() {
@@ -44,6 +80,15 @@ public struct StoreKitSkanReporter: SkanReporter {
   }
 
   public func update(fine: Int, coarse: CoarseValue, lockWindow: Bool) async throws {
+    // AdAttributionKit first, and its failure is swallowed on purpose: it is
+    // the expected answer when no AAK-signed impression exists. Letting it
+    // propagate would abandon a perfectly good SKAN value.
+    do {
+      try await adAttributionUpdate(fine, coarse, lockWindow)
+    } catch {
+      onError("skan.adAttributionKit", error)
+    }
+
     #if os(iOS)
       if #available(iOS 16.1, *) {
         try await SKAdNetwork.updatePostbackConversionValue(
@@ -65,6 +110,20 @@ public struct StoreKitSkanReporter: SkanReporter {
     // app or the SDK could do about it.
   }
 }
+
+#if os(iOS) && canImport(AdAttributionKit)
+  extension CoarseValue {
+    /// AdAttributionKit's own enum, distinct from StoreKit's.
+    @available(iOS 17.4, *)
+    var adAttributionValue: AdAttributionKit.CoarseConversionValue {
+      switch self {
+      case .low: return .low
+      case .medium: return .medium
+      case .high: return .high
+      }
+    }
+  }
+#endif
 
 #if os(iOS)
   extension CoarseValue {
