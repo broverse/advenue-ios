@@ -24,6 +24,10 @@ public struct HttpTransport: EventTransport, Sendable {
   private let signer: any Signer
   private let clock: any Clock
   private let session: URLSession
+  /// Receives the app the server reported for an ACCEPTED batch. Purely
+  /// diagnostic: it runs after the batch is already accepted, so nothing it
+  /// does can turn a successful ingest into a failure.
+  private let onAccepted: @Sendable (String) -> Void
 
   public init(
     endpoint: String = DEFAULT_ENDPOINT,
@@ -31,8 +35,10 @@ public struct HttpTransport: EventTransport, Sendable {
     signingSecret: String? = nil,
     signer: any Signer = CryptoKitSigner(),
     clock: any Clock = SystemClock(),
-    session: URLSession = .shared
+    session: URLSession = .shared,
+    onAccepted: @escaping @Sendable (String) -> Void = { _ in }
   ) {
+    self.onAccepted = onAccepted
     self.endpoint = endpoint
     self.apiKey = apiKey
     self.signingSecret = signingSecret
@@ -68,8 +74,9 @@ public struct HttpTransport: EventTransport, Sendable {
   public func send(_ events: [ClientEvent]) async throws {
     let request = try buildRequest(events)
     let response: URLResponse
+    let payload: Data
     do {
-      (_, response) = try await session.data(for: request)
+      (payload, response) = try await session.data(for: request)
     } catch {
       // No status to reason about. 408 marks it retryable, which is what
       // sdk-core does for the same case.
@@ -78,6 +85,14 @@ public struct HttpTransport: EventTransport, Sendable {
     guard let http = response as? HTTPURLResponse else { throw IngestError(status: 408) }
     guard (200..<300).contains(http.statusCode) else {
       throw IngestError(status: http.statusCode)
+    }
+
+    // Diagnostics only — the batch is already accepted at this point, so a
+    // missing or unparseable body must change nothing.
+    if let body = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+      let appId = body["appId"] as? String, !appId.isEmpty
+    {
+      onAccepted(appId)
     }
   }
 }

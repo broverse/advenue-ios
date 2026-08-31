@@ -69,6 +69,9 @@ public actor AdvenueEngine {
   private var idfa: String?
   private var vendorId: String?
   private var appInstanceId: String?
+  private var consentData: Consent?
+  private var pushToken: String?
+  private var pushProvider: String?
   private var flushing = false
   private var consecutiveFailures = 0
   private var backoffUntilMs: Int64 = 0
@@ -96,6 +99,7 @@ public actor AdvenueEngine {
     self.sessions = SessionTracker(
       store: store, clock: clock, windowMs: config.sessionWindowMs, uuid: uuid)
     self.consent = store.string(forKey: CONSENT_KEY) == "granted"
+    self.consentData = Self.readConsentData(store)
   }
 
   /// Enqueues an event, or refuses it and says why. Returns whether it was
@@ -123,6 +127,12 @@ public actor AdvenueEngine {
     event.idfa = idfa
     event.vendorId = vendorId
     event.appInstanceId = appInstanceId
+    event.consent = consentData
+    // Lifecycle events only — see trackInstall.
+    if type == "session" {
+      event.pushToken = pushToken
+      event.pushProvider = pushProvider
+    }
     event.properties = properties
     queue.enqueue(event)
     return true
@@ -161,6 +171,11 @@ public actor AdvenueEngine {
     event.idfa = idfa
     event.vendorId = vendorId
     event.appInstanceId = appInstanceId
+    event.consent = consentData
+    // Lifecycle events only. A push token is ~180 bytes and the registry needs
+    // it periodically, not on every custom event in a 100-event batch.
+    event.pushToken = pushToken
+    event.pushProvider = pushProvider
     // Install-only: an attribution input, not a per-event property.
     event.adservicesToken = adservicesToken
     queue.enqueue(event)
@@ -172,6 +187,58 @@ public actor AdvenueEngine {
   public func setConsent(_ granted: Bool) {
     consent = granted
     store.set(granted ? "granted" : "denied", forKey: CONSENT_KEY)
+  }
+
+  /// Granular ad-platform consent. Last write wins and it is persisted, so it
+  /// survives restarts — a stated preference silently reverting on relaunch is
+  /// the failure this guards.
+  public func setConsentData(_ consent: Consent?) {
+    guard !forgotten else { return }
+    consentData = consent
+    guard let consent else {
+      store.removeObject(forKey: CONSENT_DATA_KEY)
+      return
+    }
+    if let data = try? EventEncoding.canonicalEncoder().encode(consent) {
+      store.set(String(decoding: data, as: UTF8.self), forKey: CONSENT_DATA_KEY)
+    }
+  }
+
+  public func getConsentData() -> Consent? { consentData }
+
+  /// Registers the device's push token for uninstall measurement (#26).
+  ///
+  /// The host app owns push registration: the SDK never asks for the
+  /// notification permission and never displays anything. Pass the token your
+  /// push library already gives you, on every launch — the OS can rotate it at
+  /// any time, and a stale token is the one thing that makes uninstall
+  /// measurement report churn that did not happen.
+  ///
+  /// `provider` should be passed explicitly by an iOS app using Firebase
+  /// Messaging: that app holds an FCM token, and probing it against APNs would
+  /// look like an uninstall on every device.
+  public func setPushToken(_ token: String?, provider: String? = nil) {
+    guard !forgotten else { return }
+    guard let token else {
+      pushToken = nil
+      pushProvider = nil
+      return
+    }
+    let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard isValidPushToken(trimmed) else {
+      pushToken = nil
+      pushProvider = nil
+      onError("push.setPushToken", IngestError(status: 400))
+      return
+    }
+    pushToken = trimmed
+    pushProvider = provider ?? (config.platform == "android" ? "fcm" : "apns")
+  }
+
+  private static func readConsentData(_ store: KeyValueStore) -> Consent? {
+    guard let raw = store.string(forKey: CONSENT_DATA_KEY), let data = raw.data(using: .utf8)
+    else { return nil }
+    return try? JSONDecoder().decode(Consent.self, from: data)
   }
 
   public func setUserId(_ id: String?) {
@@ -192,6 +259,9 @@ public actor AdvenueEngine {
     queue.clear()
     sessions.reset()
     consent = false
+    consentData = nil
+    pushToken = nil
+    pushProvider = nil
     customerUserId = nil
     for key in [CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY] {
       store.removeObject(forKey: key)
@@ -291,6 +361,8 @@ public enum Command: Sendable {
   case background
   case flush
   case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?)
+  case setConsentData(Consent?)
+  case setPushToken(token: String?, provider: String?)
   case trackInstall(adservicesToken: String?)
 }
 
@@ -351,6 +423,10 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setIdentity(idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId)
     case .trackInstall(let token):
       await engine.trackInstall(adservicesToken: token)
+    case .setConsentData(let consent):
+      await engine.setConsentData(consent)
+    case .setPushToken(let token, let provider):
+      await engine.setPushToken(token, provider: provider)
     }
   }
 

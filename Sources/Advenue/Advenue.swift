@@ -28,6 +28,46 @@ public enum Advenue {
   public static func setUserId(_ id: String?) { state.submit(.setUserId(id)) }
   public static func setConsent(_ granted: Bool) { state.submit(.setConsent(granted)) }
 
+  /// Granular ad-platform consent (Google DMA), forwarded by server-side
+  /// postbacks as gdpr_applies / ad_user_data / ad_personalization / ad_storage.
+  ///
+  /// Leave a field nil when the user has not been asked: "not stated" is not
+  /// "denied", and inventing false on their behalf records a refusal that never
+  /// happened.
+  public static func setConsentData(_ consent: Consent?) {
+    state.submit(.setConsentData(consent))
+  }
+
+  /// Registers the device's push token for uninstall measurement.
+  ///
+  /// Advenue never asks for the notification permission and never displays
+  /// anything. Pass the token your push library already gives you, on every
+  /// launch: the OS can rotate it, and a stale token is what makes uninstall
+  /// measurement report churn that did not happen.
+  ///
+  /// Pass `provider: "fcm"` if this app holds an FCM token rather than an APNs
+  /// one — probing an FCM token against APNs looks like an uninstall on every
+  /// device.
+  public static func setPushToken(_ token: String?, provider: String? = nil) {
+    state.submit(.setPushToken(token: token, provider: provider))
+  }
+
+  /// The app the ingestion service resolved this API key to, or nil until a
+  /// batch has been accepted.
+  ///
+  /// The API key is the SDK's entire app identity, so pasting the wrong one is
+  /// silent: events are still accepted, just recorded against another app, and
+  /// every screen the integrator checks is the one they believe they
+  /// configured. This is the answer to "which app am I actually writing to",
+  /// read from the device rather than inferred from the dashboard.
+  public static func resolvedAppId() -> String? { state.resolvedAppId }
+
+  /// Resolves the deferred deep link for this install, or nil for an organic
+  /// one. Safe to call once on first launch; the app routes on the result.
+  public static func resolveDeferredDeepLink() async -> DeepLink? {
+    await state.resolveDeferredDeepLink()
+  }
+
   /// Erasure. Spans both stores — see `FacadeState.forgetMe`.
   public static func forgetMe() { state.forgetMe() }
 
@@ -75,6 +115,24 @@ public enum Advenue {
   public static func shutdown() { state.stop() }
 }
 
+/// Thread-safe holder for the app the server reported. Diagnostics only.
+final class AcceptedAppId: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: String?
+
+  var current: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return value
+  }
+
+  func set(_ appId: String) {
+    lock.lock()
+    value = appId
+    lock.unlock()
+  }
+}
+
 /// Holds what a static facade cannot: the live engine, the command pipe, the
 /// pre-init deep-link buffer and the resolved identity.
 final class FacadeState: @unchecked Sendable {
@@ -83,6 +141,9 @@ final class FacadeState: @unchecked Sendable {
   private var secure: (any SecureStore)?
   private var store: (any KeyValueStore)?
   private var resolvedDeviceId: String?
+  /// Set by the transport after a batch is accepted; diagnostics only.
+  private let acceptedAppId = AcceptedAppId()
+  private var startedConfig: AdvenueConfig?
   private var pendingDeepLinks: [URL] = []
   private var appInstanceIdProvider: (@Sendable () async -> String?)?
   private var flushTimer: DispatchSourceTimer?
@@ -122,7 +183,10 @@ final class FacadeState: @unchecked Sendable {
       transport
       ?? HttpTransport(
         endpoint: config.endpoint, apiKey: config.apiKey,
-        signingSecret: config.signingSecret)
+        signingSecret: config.signingSecret,
+        // Diagnostics only: it runs after the batch is already accepted, so
+        // nothing it does can turn a successful ingest into a failure.
+        onAccepted: { [acceptedAppId] appId in acceptedAppId.set(appId) })
 
     let engine = AdvenueEngine(
       config: EngineConfig(
@@ -211,6 +275,26 @@ final class FacadeState: @unchecked Sendable {
   /// and there is nothing to await yet. The PUBLIC accessor stays async
   /// because deferred identity will eventually wait for first unlock, and
   /// changing that signature later would break every caller.
+  var resolvedAppId: String? { acceptedAppId.current }
+
+  private func lookupTarget() -> (AdvenueConfig, String)? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let config = startedConfig, let deviceId = resolvedDeviceId else { return nil }
+    return (config, deviceId)
+  }
+
+  /// Polls the conversion lookup. Returns nil for an organic install, which is
+  /// most of them.
+  func resolveDeferredDeepLink() async -> DeepLink? {
+    // Snapshot synchronously first: NSLock cannot be held across an await, and
+    // the same constraint shaped `currentDeviceId`.
+    guard let (config, deviceId) = lookupTarget() else { return nil }
+    return await AdvenueCore.resolveDeferredDeepLink(
+      fetcher: HttpConversionFetcher(
+        endpoint: config.endpoint, apiKey: config.apiKey, deviceId: deviceId))
+  }
+
   var currentDeviceId: String? {
     lock.lock()
     defer { lock.unlock() }

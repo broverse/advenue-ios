@@ -29,6 +29,7 @@ public struct ClientEvent: Codable, Sendable, Equatable {
   public var androidId: String?
   public var customerUserId: String?
   public var appInstanceId: String?
+  public var consent: Consent?
   public var properties: [String: AdvenueValue]?
   public var pushToken: String?
   public var pushProvider: String?
@@ -83,6 +84,7 @@ public struct ClientEvent: Codable, Sendable, Equatable {
     attestationChallenge = try c.decodeIfPresent(String.self, forKey: .attestationChallenge)
     deviceCheckToken = try c.decodeIfPresent(String.self, forKey: .deviceCheckToken)
     adservicesToken = try c.decodeIfPresent(String.self, forKey: .adservicesToken)
+    consent = try c.decodeIfPresent(Consent.self, forKey: .consent)
     properties = nil
   }
 }
