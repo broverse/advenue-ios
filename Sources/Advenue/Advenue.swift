@@ -164,7 +164,7 @@ final class FacadeState: @unchecked Sendable {
     _ config: AdvenueConfig,
     transport: (any EventTransport)? = nil,
     sources: EnrichmentSources? = nil,
-    skan: (any SkanReporter)? = nil
+    skan skanReporter: (any SkanReporter)? = nil
   ) {
     // Replace-and-shut-down, never add.
     stop()
@@ -213,17 +213,45 @@ final class FacadeState: @unchecked Sendable {
     // Armed only when there are rules to evaluate. The reporter is injectable
     // for the same reason the transport is: an unwired one is invisible, and
     // that shape has already cost this SDK three defects.
-    if let rules = config.conversionValues, let mapper = try? ConversionValueMapper(rules) {
-      // Submitted through the pipe, not a bare Task. The pipe is ordered, so
-      // arming lands ahead of anything the app tracks after initialize returns.
-      // A Task raced them, and an event tracked in that window reached the
-      // engine before SKAN existed and was silently dropped — a real app calls
-      // initialize and then tracks immediately.
+    // SKAN is armed from the config the SERVER serves, not from one baked into
+    // the app: a conversion schema is tuned constantly and an app release cycle
+    // is weeks, so a config that can only change by shipping a binary is a
+    // config nobody changes. The app-supplied one stays as an offline default.
+    //
+    // The cached config arms SKAN synchronously through the ordered pipe, so an
+    // event tracked immediately after initialize is measured. The network fetch
+    // then re-arms if the server has something newer — a fetch raced against
+    // those first events would silently drop them.
+    let cached = SkanConfigCache.load(store)
+    let reporter = skanReporter ?? StoreKitSkanReporter(onError: config.onError)
+
+    if let initial = chooseSkanConfig(
+      fetched: nil, cached: cached, fallback: config.conversionValues),
+      let mapper = try? ConversionValueMapper(initial.rules)
+    {
       pipe.submit(
         .enableSkan(
-          mapper: mapper, currency: rules.revenueCurrency,
-          installationId: installationId,
-          reporter: skan ?? StoreKitSkanReporter(onError: config.onError)))
+          mapper: mapper, currency: initial.rules.revenueCurrency,
+          installationId: installationId, reporter: reporter,
+          configVersion: initial.version))
+    }
+
+    if skanReporter == nil {
+      let fetcher = HttpSkanConfigFetcher(endpoint: config.endpoint, apiKey: config.apiKey)
+      Task {
+        let fetched = try? await fetcher.fetch(etag: cached?.etag)
+        guard let chosen = chooseSkanConfig(
+          fetched: fetched, cached: cached, fallback: config.conversionValues),
+          chosen.version != cached?.version || cached == nil,
+          let mapper = try? ConversionValueMapper(chosen.rules)
+        else { return }
+        SkanConfigCache.save(chosen, to: store)
+        pipe.submit(
+          .enableSkan(
+            mapper: mapper, currency: chosen.rules.revenueCurrency,
+            installationId: installationId, reporter: reporter,
+            configVersion: chosen.version))
+      }
     }
 
     lock.lock()

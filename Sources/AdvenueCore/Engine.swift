@@ -239,11 +239,12 @@ public actor AdvenueEngine {
     mapper: ConversionValueMapper,
     currency: String?,
     installationId: String,
-    reporter: any SkanReporter
+    reporter: any SkanReporter,
+    configVersion: Int = 0
   ) {
     skan = SkanStateMachine(
       store: store, clock: clock, installationId: installationId,
-      mapper: mapper, currency: currency)
+      mapper: mapper, currency: currency, configVersion: configVersion)
     skanReporter = reporter
     reporter.register()
   }
@@ -432,7 +433,7 @@ public enum Command: Sendable {
   case recordSkan(event: String?, revenueMicros: String?, revenueCurrency: String?)
   case enableSkan(
     mapper: ConversionValueMapper, currency: String?, installationId: String,
-    reporter: any SkanReporter)
+    reporter: any SkanReporter, configVersion: Int)
   case trackInstall(
     adservicesToken: String?, attestation: AttestationResult?, attestationChallenge: String?)
 }
@@ -503,10 +504,10 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setDeviceInfo(info)
     case .recordSkan(let event, let micros, let currency):
       await engine.recordSkan(event: event, revenueMicros: micros, revenueCurrency: currency)
-    case .enableSkan(let mapper, let currency, let installationId, let reporter):
+    case .enableSkan(let mapper, let currency, let installationId, let reporter, let version):
       await engine.enableSkan(
         mapper: mapper, currency: currency, installationId: installationId,
-        reporter: reporter)
+        reporter: reporter, configVersion: version)
     }
   }
 

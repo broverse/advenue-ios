@@ -94,7 +94,8 @@ public final class SkanStateMachine {
     clock: Clock,
     installationId: String,
     mapper: ConversionValueMapper,
-    currency: String? = nil
+    currency: String? = nil,
+    configVersion: Int = 0
   ) {
     self.store = store
     self.clock = clock
@@ -103,6 +104,9 @@ public final class SkanStateMachine {
     self.currency = currency
     self.state = Self.load(store, key: skanStateKey(installationId: installationId))
       ?? SkanMeasurementState(firstLaunchAt: clock.nowMs())
+    // Recorded so the server can tell which config produced a reported value.
+    // A schema change mid-window otherwise looks like a device behaving oddly.
+    self.state.configVersion = configVersion
     persist()
   }
 

@@ -16,7 +16,12 @@ import Foundation
 public struct DeviceCheckAttestation: Attestation {
   /// The cached key id. Apple charges for `generateKey`, and more importantly a
   /// key can be attested only once, so the id has to outlive the call.
-  public static let KEY_ID_KEY = "advenue.appattest.key_id"
+  /// The account name the React Native module already uses. Matching it is not
+  /// cosmetic: an app upgrading onto this SDK would otherwise regenerate its
+  /// attest key, and the server has the old key id recorded as attested for
+  /// that device — a fresh one arriving reads as a new device or a
+  /// re-attestation. A key can be attested only once, so the waste is real too.
+  public static let KEY_ID_KEY = "app-attest-key-id"
 
   private let secure: any SecureStore
 
