@@ -252,6 +252,47 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(names.contains("session_end"), "an interruption must not end the session")
   }
 
+  /// A wrapper's version must reach the wire, not the native SDK's.
+  ///
+  /// An event stamped `0.1.0` says "the Swift SDK", which is true of every
+  /// install and therefore useless. What support needs is which WRAPPER
+  /// produced it, because a wrapper release pins the native snapshot inside it
+  /// and wrapper-specific bugs are the ones that need identifying. Adjust and
+  /// AppsFlyer both report the wrapper for this reason.
+  func testAWrapperVersionOverridesTheNativeOne() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    config.sdkVersion = "react-native/0.9.0"
+    state.start(config, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "purchase", properties: nil, type: "custom"))
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.events.isEmpty }
+    let event = await transport.events.first
+    XCTAssertEqual(event?.sdkVersion, "react-native/0.9.0")
+  }
+
+  /// Left alone, it is still the native SDK's own version.
+  func testTheNativeVersionIsTheDefault() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "purchase", properties: nil, type: "custom"))
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.events.isEmpty }
+    let event = await transport.events.first
+    XCTAssertEqual(event?.sdkVersion, AdvenueVersion.current)
+  }
+
   /// Apple wants registration at first launch; a late call loses the
   /// attribution window.
   func testRegistrationHappensAtStart() async throws {

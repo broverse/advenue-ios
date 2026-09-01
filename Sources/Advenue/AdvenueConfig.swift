@@ -29,6 +29,20 @@ public struct AdvenueConfig: Sendable {
   /// Called when the SDK swallows a best-effort failure. Never receives PII.
   public var onError: @Sendable (String, any Error) -> Void
 
+  /// Overrides the version stamped on every event. Set by a WRAPPER SDK, never
+  /// by an app.
+  ///
+  /// An event stamped with the Swift SDK's own version says the same thing for
+  /// every install and answers nothing. The useful answer is which wrapper
+  /// produced it — a React Native or Flutter release pins the native snapshot
+  /// inside it, so the wrapper's version identifies both, and wrapper-specific
+  /// bugs are the ones that need identifying. Adjust and AppsFlyer report the
+  /// wrapper for the same reason.
+  ///
+  /// Capped at 32 characters by the ingest schema; a longer value would take
+  /// the whole batch down with a 400, so it is truncated rather than sent.
+  public var sdkVersion: String?
+
   public init(
     apiKey: String,
     endpoint: String = DEFAULT_ENDPOINT,
@@ -39,7 +53,8 @@ public struct AdvenueConfig: Sendable {
     flushIntervalMs: Int = 15_000,
     signingSecret: String? = nil,
     conversionValues: ConversionValueConfig? = nil,
-    onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in }
+    onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in },
+    sdkVersion: String? = nil
   ) {
     self.apiKey = apiKey
     self.endpoint = endpoint
@@ -51,6 +66,7 @@ public struct AdvenueConfig: Sendable {
     self.signingSecret = signingSecret
     self.conversionValues = conversionValues
     self.onError = onError
+    self.sdkVersion = sdkVersion
   }
 }
 

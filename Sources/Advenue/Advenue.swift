@@ -248,7 +248,8 @@ final class FacadeState: @unchecked Sendable {
       config: EngineConfig(
         apiKey: config.apiKey, platform: "ios", deviceId: deviceId,
         installationId: installationId, appVersion: config.appVersion,
-        osVersion: osVersion, sdkVersion: AdvenueVersion.current,
+        osVersion: osVersion,
+        sdkVersion: String((config.sdkVersion ?? AdvenueVersion.current).prefix(32)),
         requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,
         batchSize: config.batchSize),
       store: store, clock: SystemClock(), scheduler: TimerScheduler(), uuid: uuid,
