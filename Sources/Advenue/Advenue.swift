@@ -108,7 +108,7 @@ public enum Advenue {
   /// Resolves the deferred deep link for this install, or nil for an organic
   /// one. Safe to call once on first launch; the app routes on the result.
   public static func resolveDeferredDeepLink() async -> DeepLink? {
-    await state.resolveDeferredDeepLink()
+    await state.fetchDeferredDeepLink()
   }
 
   /// Erasure. Spans both stores — see `FacadeState.forgetMe`.
@@ -437,11 +437,18 @@ final class FacadeState: @unchecked Sendable {
 
   /// Polls the conversion lookup. Returns nil for an organic install, which is
   /// most of them.
-  func resolveDeferredDeepLink() async -> DeepLink? {
+  /// Named apart from the free function it calls, deliberately.
+  ///
+  /// It used to share that name and reach it through an `AdvenueCore.`
+  /// qualifier. That works here and breaks in the wrapper SDKs, which flatten
+  /// these modules into one — where the qualifier names nothing and dropping it
+  /// would call this method again, forever. A distinct name removes the trap
+  /// instead of relying on everyone remembering it.
+  func fetchDeferredDeepLink() async -> DeepLink? {
     // Snapshot synchronously first: NSLock cannot be held across an await, and
     // the same constraint shaped `currentDeviceId`.
     guard let (config, deviceId) = lookupTarget() else { return nil }
-    return await AdvenueCore.resolveDeferredDeepLink(
+    return await resolveDeferredDeepLink(
       fetcher: HttpConversionFetcher(
         endpoint: config.endpoint, apiKey: config.apiKey, deviceId: deviceId))
   }
@@ -488,7 +495,7 @@ final class FacadeState: @unchecked Sendable {
       let campaignIds = extractAemCampaignIds(applink)
     else { return }
 
-    let hash = AdvenuePlatform.sha256Hex(url.absoluteString)
+    let hash = sha256Hex(url.absoluteString)
     lock.lock()
     let fresh = seenAemUrlHashes.insert(hash).inserted
     lock.unlock()
