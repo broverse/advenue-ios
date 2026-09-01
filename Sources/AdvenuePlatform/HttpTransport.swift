@@ -10,7 +10,6 @@ struct EventBatch: Encodable {
 
 public let DEFAULT_ENDPOINT = "https://ingest.advenue.io"
 /// The schema caps a batch at 100 events.
-public let MAX_BATCH_SIZE = 100
 
 /// Batched ingest over URLSession.
 ///

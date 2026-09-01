@@ -39,6 +39,14 @@ public struct EngineConfig: Sendable {
   }
 }
 
+/// The server rejects a batch of more than this: `eventBatchSchema` in
+/// `packages/shared/src/events.ts` is `z.array(clientEventSchema).min(1).max(100)`.
+///
+/// It lives in the core rather than beside the transport because it is a fact
+/// about the wire, not about any one way of reaching it — and because the
+/// engine has to clamp to it, which the transport cannot do from where it sits.
+public let MAX_BATCH_SIZE = 100
+
 /// Dies with the app; guards the one-per-install first-open event. Lives in the
 /// core because the engine owns the guard — the Keychain is deliberately never
 /// consulted for it, since a durable flag would suppress legitimate reinstalls.
@@ -393,7 +401,12 @@ public actor AdvenueEngine {
     flushing = true
     defer { flushing = false }
 
-    let events = queue.peek(config.batchSize)
+    // Clamped to the wire's limit, not trusted. The server answers 400 for a
+    // larger batch and a 400 is not retryable, so an app that set 200 would
+    // have every batch rejected and then re-sent one event at a time by the
+    // poison-isolation path: nothing lost, and every flush costing 1 + N
+    // requests forever. The constant said 100 and enforced nothing until now.
+    let events = queue.peek(min(config.batchSize, MAX_BATCH_SIZE))
     if events.isEmpty { return }
 
     do {
