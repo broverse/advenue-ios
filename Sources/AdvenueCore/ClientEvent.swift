@@ -51,9 +51,17 @@ public struct ClientEvent: Codable, Sendable, Equatable {
     self.platform = platform
   }
 
-  /// Required for the queue's reload path. `properties` is deliberately not
-  /// decoded: nothing reads it back, and giving `AdvenueValue` a Decodable
-  /// conformance would mean accepting arbitrary JSON into a closed type.
+  /// Required for the queue's reload path — and `properties` is decoded with
+  /// everything else, which it was not.
+  ///
+  /// It used to be dropped, on the premise that "nothing reads it back". The
+  /// premise was false: `EventQueue` assigns `events = load(store)` and
+  /// `peek()` returns from `events`, so a reloaded object is exactly what the
+  /// transport re-encodes and sends. An app killed before flushing therefore
+  /// sent every buffered event with no payload — no revenue, no currency, no
+  /// sku. The encoder had always written them; only this refused to read them.
+  ///
+  /// A queue conformance vector now pins it in both SDKs at once.
   public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     id = try c.decode(String.self, forKey: .id)
@@ -85,7 +93,7 @@ public struct ClientEvent: Codable, Sendable, Equatable {
     deviceCheckToken = try c.decodeIfPresent(String.self, forKey: .deviceCheckToken)
     adservicesToken = try c.decodeIfPresent(String.self, forKey: .adservicesToken)
     consent = try c.decodeIfPresent(Consent.self, forKey: .consent)
-    properties = nil
+    properties = try c.decodeIfPresent([String: AdvenueValue].self, forKey: .properties)
   }
 }
 

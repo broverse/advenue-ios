@@ -1,0 +1,43 @@
+{
+  "name": "an event's properties survive a persist and a reload",
+  "source": "packages/sdk-swift/Sources/AdvenueCore/ClientEvent.swift init(from:) and packages/sdk-android/sdk/src/main/kotlin/io/advenue/core/ClientEvent.kt fromMap — both dropped `properties` on the queue's reload path. EventQueue assigns `events = load(store)` and `peek()` returns from `events`, so a reloaded object is what the transport re-encodes: an app killed before flushing sent every buffered event with no payload at all. The encoder always wrote the properties; only the decoder refused to read them back. The other four queue vectors work purely in event ids, which is why two implementations wrote the same hole and agreed with each other.",
+  "kind": "queue",
+  "maxSize": 10,
+  "steps": [
+    {
+      "op": "enqueue",
+      "events": [
+        {
+          "id": "a",
+          "properties": {
+            "sku": "pro",
+            "qty": 3,
+            "price": 9.99,
+            "gift": false,
+            "tags": ["launch", null],
+            "meta": { "tier": "gold", "renewals": 2 }
+          }
+        }
+      ]
+    },
+    { "op": "runScheduled" },
+    { "op": "reload" },
+    {
+      "op": "expectPeekEvents",
+      "max": 10,
+      "events": [
+        {
+          "id": "a",
+          "properties": {
+            "sku": "pro",
+            "qty": 3,
+            "price": 9.99,
+            "gift": false,
+            "tags": ["launch", null],
+            "meta": { "tier": "gold", "renewals": 2 }
+          }
+        }
+      ]
+    }
+  ]
+}

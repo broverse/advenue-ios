@@ -57,3 +57,39 @@ extension AdvenueValue: Encodable {
     }
   }
 }
+
+/// Reads back exactly what `Encodable` above writes, and refuses anything else.
+///
+/// The closed type exists to protect the CALL SITE — a caller must not be able
+/// to hand the SDK a value it cannot encode. Decoding is the other direction:
+/// these bytes were written from an `AdvenueValue`, so accepting the shapes it
+/// can represent takes nothing away from that guarantee. Anything outside them
+/// throws, and `EventQueue.load` already turns a throwing blob into an empty
+/// queue rather than bricking the SDK.
+///
+/// Order matters. `Int` is tried before `Double`, because a decoder that read
+/// `3` as `3.0` would restore the property and silently change its type on the
+/// wire — a quieter version of the bug this conformance exists to fix.
+extension AdvenueValue: Decodable {
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() {
+      self = .null
+    } else if let v = try? container.decode(Bool.self) {
+      self = .bool(v)
+    } else if let v = try? container.decode(Int.self) {
+      self = .int(v)
+    } else if let v = try? container.decode(Double.self) {
+      self = .double(v)
+    } else if let v = try? container.decode(String.self) {
+      self = .string(v)
+    } else if let v = try? container.decode([AdvenueValue].self) {
+      self = .array(v)
+    } else if let v = try? container.decode([String: AdvenueValue].self) {
+      self = .object(v)
+    } else {
+      throw DecodingError.dataCorruptedError(
+        in: container, debugDescription: "not a value AdvenueValue can represent")
+    }
+  }
+}
