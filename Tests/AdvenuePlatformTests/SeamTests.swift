@@ -79,6 +79,10 @@ final class SeamTests: XCTestCase {
   private static func clearPersistedState() {
     let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
     defaults?.removeObject(forKey: INSTALL_SENT_KEY)
+    // Session state too: a case that backgrounds leaves a closed session behind,
+    // and the next case's first foreground then reports the gap and emits a
+    // session_end for it — a session boundary from the previous test.
+    defaults?.removeObject(forKey: SESSION_STATE_KEY)
     // Every SKAN key, not just the state.
     //
     // The state is keyed by installation id, which is stable on this host, so a
@@ -202,6 +206,50 @@ final class SeamTests: XCTestCase {
     let call = await reporter.calls.first { $0.fine == 10 }
     XCTAssertNotNil(call, "the tracked event never reached SKAdNetwork")
     XCTAssertEqual(call?.coarse, .low)
+  }
+
+  /// The fifth seam. The tracker decides correctly and the observers are
+  /// registered — but nothing proved a signal actually reaches the session
+  /// tracker, which is the same shape as the transport nothing constructed and
+  /// the SKAN model nothing called.
+  ///
+  /// Backgrounding is asserted through the transport rather than the queue
+  /// because it must do two things, and the second is the one that gets
+  /// forgotten: close the session AND flush. A batch stranded at the moment the
+  /// app leaves the foreground may otherwise not be sent for hours.
+  func testABackgroundSignalClosesTheSessionAndFlushes() async throws {
+    let transport = RecordingTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.handle(.didEnterBackground)
+
+    try await Self.until(timeout: 5) {
+      await transport.seen.flatMap { $0 }.contains("session_end")
+    }
+  }
+
+  /// An interruption is not a backgrounding. Control Center and an incoming
+  /// call both resign active without backgrounding, and reading that as a
+  /// session end inflates session counts by an order of magnitude.
+  func testAnInterruptionEmitsNothing() async throws {
+    let transport = RecordingTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.handle(.willResignActive)
+    state.handle(.didBecomeActive)
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.seen.isEmpty }
+    let names = await transport.seen.flatMap { $0 }
+    XCTAssertFalse(names.contains("session_end"), "an interruption must not end the session")
   }
 
   /// Apple wants registration at first launch; a late call loses the

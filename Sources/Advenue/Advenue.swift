@@ -191,6 +191,11 @@ final class FacadeState: @unchecked Sendable {
   private var seenAemUrlHashes: Set<String> = []
   private var appInstanceIdProvider: (@Sendable () async -> String?)?
   private var flushTimer: DispatchSourceTimer?
+  /// Observers on the app's own lifecycle notifications, and the machine that
+  /// decides what they mean. Held so `stop()` can remove them: a stale observer
+  /// submitting into a finished pipe outlives the instance that made it.
+  private var lifecycleObservers: [NSObjectProtocol] = []
+  private var foreground = ForegroundTracker()
   /// Read caches for the two consent values. The engine owns persistence; these
   /// exist so a synchronous getter can answer without a round trip through the
   /// pipe, and so a caller reading back its own `setConsent` never sees the
@@ -312,6 +317,9 @@ final class FacadeState: @unchecked Sendable {
     // link is attributed to the launch it belongs to.
     for url in buffered { send(url) }
     pipe.submit(.foreground)
+    // Seeded to match: the line above IS this launch's foreground, so the
+    // activation notification that follows must not open a second session.
+    observeLifecycle(seededInForeground: true)
 
     if config.flushIntervalMs > 0 {
       let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
@@ -508,17 +516,82 @@ final class FacadeState: @unchecked Sendable {
         type: "custom"))
   }
 
+  /// Subscribes to the app's own lifecycle, so an integrator does not have to.
+  ///
+  /// The Android SDK has always done this through `ActivityLifecycleCallbacks`;
+  /// iOS did not, and the asymmetry had no stated reason. Its cost was real: a
+  /// native app opened one session at launch and then never another, because a
+  /// return from background after the session window went unnoticed — and
+  /// backgrounding neither closed the session nor flushed, so a batch could sit
+  /// on the device until the next launch.
+  ///
+  /// `NotificationCenter` rather than `UIApplication.shared`, deliberately:
+  /// the notification names are plain constants, while `shared` is unavailable
+  /// in an app extension and merely referencing it there fails to link.
+  private func observeLifecycle(seededInForeground: Bool) {
+    // Seeded OUTSIDE the UIKit guard, deliberately. The tracker's state is
+    // platform-independent and must be right even where no observer can be
+    // registered — a macOS test process, for one, which is exactly where
+    // leaving it inside the guard made a signal read as a fresh foreground.
+    lock.lock()
+    foreground = ForegroundTracker(inForeground: seededInForeground)
+    lock.unlock()
+
+    #if canImport(UIKit)
+      let signals: [(Notification.Name, LifecycleSignal)] = [
+        (UIApplication.didBecomeActiveNotification, .didBecomeActive),
+        (UIApplication.willResignActiveNotification, .willResignActive),
+        (UIApplication.didEnterBackgroundNotification, .didEnterBackground),
+      ]
+      var registered: [NSObjectProtocol] = []
+      for (name, signal) in signals {
+        registered.append(
+          NotificationCenter.default.addObserver(
+            forName: name, object: nil, queue: nil
+          ) { [weak self] _ in
+            self?.handle(signal)
+          })
+      }
+      lock.lock()
+      lifecycleObservers = registered
+      lock.unlock()
+    #endif
+  }
+
+  /// Applies one lifecycle signal. Public routing lives here rather than in the
+  /// observer closure so a test can drive it without UIKit.
+  func handle(_ signal: LifecycleSignal) {
+    lock.lock()
+    let transition = foreground.on(signal)
+    lock.unlock()
+    switch transition {
+    case .none:
+      return
+    case .enteredForeground:
+      submit(.foreground)
+    case .enteredBackground:
+      // Backgrounding both closes the session and flushes: a batch stranded at
+      // the moment the app leaves the foreground may not be sent for hours.
+      submit(.background)
+      submit(.flush)
+    }
+  }
+
   func stop() {
     lock.lock()
     let pipe = self.pipe
     let timer = flushTimer
+    let observers = lifecycleObservers
     self.pipe = nil
     flushTimer = nil
+    lifecycleObservers = []
     lock.unlock()
     // Cancel before the pipe shuts down: a timer firing into a finished stream
     // is harmless, but leaving it running leaks a repeating source per
-    // initialize() call.
+    // initialize() call. The observers go for the same reason, one instance
+    // further out.
     timer?.cancel()
+    for observer in observers { NotificationCenter.default.removeObserver(observer) }
     pipe?.shutdown()
   }
 }
