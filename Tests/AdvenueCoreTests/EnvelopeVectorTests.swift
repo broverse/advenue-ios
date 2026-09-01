@@ -38,6 +38,40 @@ final class EnvelopeVectorTests: XCTestCase {
     XCTAssertTrue(json.contains(#""properties":{"first":true,"price":9.99,"tier":"gold"}"#), json)
   }
 
+  /// A null property is omitted, exactly as an absent optional is — and a null
+  /// INSIDE an array is kept.
+  ///
+  /// The two SDKs disagreed here. Kotlin's canonical writer skipped null values
+  /// in objects and Swift emitted them, so the same call produced different
+  /// data depending on the platform. The server accepts either
+  /// (`z.record(z.string(), z.unknown())`), so nothing broke — it just meant
+  /// one warehouse row had a key the other did not.
+  ///
+  /// Omission wins because for an arbitrary event property `{"x":null}` and
+  /// `{}` say the same thing to every consumer, and the 8 KB properties cap
+  /// makes the difference pure cost. Consent is the case where "not stated" is
+  /// NOT "denied" — a property is not that case.
+  ///
+  /// Inside an array the null stays: there is no key to omit and dropping it
+  /// would shift every element after it.
+  func testNullPropertiesAreOmittedInObjectsAndKeptInArrays() throws {
+    var event = ClientEvent(
+      id: "i", deviceId: "d", type: "custom", name: "purchase",
+      timestamp: EventEncoding.iso8601(ms: 0), platform: "ios")
+    event.properties = [
+      "kept": "yes",
+      "dropped": .null,
+      "tags": .array([.string("a"), .null]),
+      "nested": .object(["kept": .int(1), "dropped": .null]),
+    ]
+
+    let json = try event.encodeCanonical()
+
+    XCTAssertTrue(
+      json.contains(#""properties":{"kept":"yes","nested":{"kept":1},"tags":["a",null]}"#),
+      json)
+  }
+
   /// Guards the pairing the envelope vectors exist to protect: every vector
   /// file has a matching expectation here, so adding a vector without teaching
   /// Swift about it fails rather than passing silently.
@@ -49,6 +83,7 @@ final class EnvelopeVectorTests: XCTestCase {
         "absent-fields-omitted.json",
         "install-with-identifiers.json",
         "minimal-custom.json",
+        "property-nulls-omitted-in-objects.json",
         "push-token-lifecycle-only.json",
       ])
   }

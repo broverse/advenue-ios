@@ -30,7 +30,27 @@ public struct ClientEvent: Codable, Sendable, Equatable {
   public var customerUserId: String?
   public var appInstanceId: String?
   public var consent: Consent?
-  public var properties: [String: AdvenueValue]?
+  /// Null-valued keys are dropped on assignment, not at encode time.
+  ///
+  /// The nested case is handled by `AdvenueValue`'s encoder, but this
+  /// dictionary is encoded by the SYNTHESISED encoder — which must stay
+  /// synthesised, because it is what omits the two dozen optional envelope
+  /// fields the server rejects an explicit null for. So the filter lives here,
+  /// on the way in, which also means the persisted queue blob matches what is
+  /// sent rather than carrying keys the wire will not.
+  ///
+  /// A property observer rather than three call sites: `track` and
+  /// `trackInstall` both assign, and a fourth path added later would otherwise
+  /// reintroduce the divergence silently. Observers do not fire during
+  /// initialisation, so the decode path is untouched — it reads data already
+  /// filtered when it was written.
+  public var properties: [String: AdvenueValue]? {
+    didSet {
+      if let current = properties, current.values.contains(.null) {
+        properties = current.filter { $0.value != .null }
+      }
+    }
+  }
   public var pushToken: String?
   public var pushProvider: String?
   public var attestationToken: String?

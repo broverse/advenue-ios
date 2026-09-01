@@ -52,7 +52,15 @@ extension AdvenueValue: Encodable {
     case .double(let v): try container.encode(v)
     case .bool(let v): try container.encode(v)
     case .array(let v): try container.encode(v)
-    case .object(let v): try container.encode(v)
+    // Null-valued keys are dropped, exactly as an absent optional is. For an
+    // event property `{"x":null}` and `{}` say the same thing to every
+    // consumer, and the server's 8 KB properties cap makes the difference pure
+    // cost. Kotlin's canonical writer has always done this; Swift did not, so
+    // the same call produced different warehouse rows by platform.
+    //
+    // Only in OBJECTS. The `.array` case above keeps its nulls, because there
+    // is no key to omit and dropping one would shift every element after it.
+    case .object(let v): try container.encode(v.filter { $0.value != .null })
     case .null: try container.encodeNil()
     }
   }

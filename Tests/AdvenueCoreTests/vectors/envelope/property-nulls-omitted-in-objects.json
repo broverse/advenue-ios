@@ -1,0 +1,20 @@
+{
+  "name": "a null property is omitted like an absent optional, but a null inside an array is kept",
+  "source": "packages/sdk-android/sdk/src/main/kotlin/io/advenue/core/Json.kt writeObject skips null-valued entries and writeValue keeps them inside arrays; packages/sdk-swift/Sources/AdvenueCore/AdvenueValue.swift now does the same. The two SDKs disagreed: Kotlin omitted, Swift emitted, so one call produced different warehouse rows depending on the platform. The server accepts either — properties are z.record(z.string(), z.unknown()) — so nothing broke, which is why nothing noticed. Omission wins because {\"x\":null} and {} say the same thing to any consumer of an event property, and the 8 KB properties cap makes the difference pure cost. Inside an array the null stays: there is no key to omit and dropping it would shift every element after it.",
+  "kind": "envelope",
+  "config": {
+    "platform": "ios",
+    "deviceId": "dev-1",
+    "nowMs": 0
+  },
+  "call": {
+    "name": "purchase",
+    "properties": {
+      "kept": "yes",
+      "dropped": null,
+      "tags": ["a", null],
+      "nested": { "kept": 1, "dropped": null }
+    }
+  },
+  "expectPropertiesJson": "{\"kept\":\"yes\",\"nested\":{\"kept\":1},\"tags\":[\"a\",null]}"
+}
