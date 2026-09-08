@@ -15,17 +15,22 @@ public struct EngineConfig: Sendable {
   public var batchSize: Int
   public var retryBaseMs: Double
   public var retryCapMs: Double
+  /// M2: track properties PII scrub'u. Varsayılan-açık; yalnızca açık bayrakla
+  /// kapatılır (opt-out) ve bu dokümante risklidir.
+  public var piiScrubEnabled: Bool
 
   public init(
     apiKey: String, platform: String, deviceId: String, installationId: String? = nil,
     appVersion: String? = nil, osVersion: String? = nil, sdkVersion: String? = nil,
     requireConsent: Bool = false, sessionWindowMs: Int64 = DEFAULT_SESSION_WINDOW_MS,
     maxQueueSize: Int = 10_000, batchSize: Int = 20,
-    retryBaseMs: Double = 1_000, retryCapMs: Double = 60_000
+    retryBaseMs: Double = 1_000, retryCapMs: Double = 60_000,
+    piiScrubEnabled: Bool = true
   ) {
     self.batchSize = batchSize
     self.retryBaseMs = retryBaseMs
     self.retryCapMs = retryCapMs
+    self.piiScrubEnabled = piiScrubEnabled
     self.apiKey = apiKey
     self.platform = platform
     self.deviceId = deviceId
@@ -150,7 +155,7 @@ public actor AdvenueEngine {
       event.pushToken = pushToken
       event.pushProvider = pushProvider
     }
-    event.properties = properties
+    event.properties = config.piiScrubEnabled ? PIIScrub.scrub(properties) : properties
     queue.enqueue(event)
     return true
   }
@@ -218,11 +223,13 @@ public actor AdvenueEngine {
     }
     // Merged rather than replacing: a caller-supplied property of the same name
     // is the app's own and wins.
+    let merged: [String: AdvenueValue]?
     if let deviceInfo {
-      event.properties = deviceInfo.merging(properties ?? [:]) { _, caller in caller }
+      merged = deviceInfo.merging(properties ?? [:]) { _, caller in caller }
     } else {
-      event.properties = properties
+      merged = properties
     }
+    event.properties = config.piiScrubEnabled ? PIIScrub.scrub(merged) : merged
     queue.enqueue(event)
 
     store.set("1", forKey: INSTALL_SENT_KEY)
