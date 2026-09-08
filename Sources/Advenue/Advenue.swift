@@ -215,7 +215,16 @@ final class FacadeState: @unchecked Sendable {
     // Replace-and-shut-down, never add.
     stop()
 
-    let store = UserDefaultsStore()
+    // B4: kuyruk blob'u Caches dosyalarına (yedek dışı); UserDefaults'ta
+    // kalan eski blob ilk okumada migrate edilir. Caches yoksa UserDefaults
+    // geri dönüşüdür — yedek kapsamı açılır ama SDK çalışır (fail-open, loglanır).
+    let store: any KeyValueStore
+    if let files = CacheFileStore.caches() {
+      store = CompositeStore(files: files)
+    } else {
+      store = UserDefaultsStore()
+      config.onError("store.cache_unavailable", IngestError(status: 0))
+    }
     let secure = KeychainStore()
     let uuid = SystemUUIDs()
 
@@ -359,7 +368,8 @@ final class FacadeState: @unchecked Sendable {
       self?.submit(
         .setIdentity(
           idfa: enrichment.idfa, vendorId: enrichment.vendorId,
-          appInstanceId: enrichment.appInstanceId))
+          appInstanceId: enrichment.appInstanceId,
+          limitAdTracking: enrichment.limitAdTracking))
       self?.submit(.setDeviceInfo(collectDeviceInfo()))
       // The CMP writes TCF to the standard defaults, and reading it is the
       // difference between shipping a real consent signal and shipping none.
@@ -489,10 +499,27 @@ final class FacadeState: @unchecked Sendable {
     return pendingDeepLinks.count
   }
 
+  /// B3: deep-link URL'sinden query+fragment atılır. URLComponents
+  /// çözümlenemezse ham dizenin `?`/`#` öncesi alınır (asla ham query sızmaz).
+  func stripUrlQuery(_ url: URL) -> String {
+    if var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+      components.query = nil
+      components.fragment = nil
+      if let stripped = components.string { return stripped }
+    }
+    let raw = url.absoluteString
+    if let cut = raw.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+      return String(raw[..<cut])
+    }
+    return raw
+  }
+
   private func send(_ url: URL) {
+    // B3: ham query gönderilmez — token/e-posta query'de taşınır. AEM
+    // ayrıştırması ve hash TAM url'den yapılır (aşağıda).
     submit(
       .track(
-        name: "deep_link", properties: ["url": .string(url.absoluteString)], type: "custom"))
+        name: "deep_link", properties: ["url": .string(stripUrlQuery(url))], type: "custom"))
 
     // Meta AEM: a link from Meta carries al_applink_data with an opaque,
     // Meta-encrypted campaign_ids blob. Emitted at most once per URL — the same

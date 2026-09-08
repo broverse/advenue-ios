@@ -43,6 +43,12 @@ public struct AdvenueConfig: Sendable {
   /// the whole batch down with a 400, so it is truncated rather than sent.
   public var sdkVersion: String?
 
+  /// B5: `https://` şema kuralı. Fail-fast `precondition` ile kurulumda
+  /// yakalanır; kuralın kendisi test edilebilir saf fonksiyondur.
+  public static func isSecureEndpoint(_ endpoint: String) -> Bool {
+    endpoint.lowercased().hasPrefix("https://")
+  }
+
   public init(
     apiKey: String,
     endpoint: String = DEFAULT_ENDPOINT,
@@ -54,8 +60,12 @@ public struct AdvenueConfig: Sendable {
     signingSecret: String? = nil,
     conversionValues: ConversionValueConfig? = nil,
     onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in },
-    sdkVersion: String? = nil
+    sdkVersion: String? = nil,
+    allowInsecureHttp: Bool = false
   ) {
+    precondition(
+      allowInsecureHttp || Self.isSecureEndpoint(endpoint),
+      "Advenue endpoint must use https:// (allowInsecureHttp is test-only)")
     self.apiKey = apiKey
     self.endpoint = endpoint
     self.appVersion = appVersion

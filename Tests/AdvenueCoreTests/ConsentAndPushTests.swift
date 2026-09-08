@@ -101,4 +101,12 @@ final class ConsentAndPushTests: XCTestCase {
     let token = await e.pendingEvents().first?.pushToken
     XCTAssertNil(token)
   }
+
+  /// B6: 128 üstü userId batch'i 400'e düşürür — reddedilir, persist edilmez.
+  func testAnOverLongUserIdIsRejected() async {
+    let e = engine(MemoryStore())
+    await e.setUserId(String(repeating: "u", count: 129))
+    await e.track("purchase")
+    XCTAssertNil(await e.pendingEvents().first?.customerUserId)
+  }
 }

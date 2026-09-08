@@ -147,6 +147,8 @@ public actor AdvenueEngine {
     event.sdkVersion = config.sdkVersion
     event.customerUserId = customerUserId
     event.idfa = idfa
+    // B2: rıza bayrağı olaya işlenir.
+    event.limitAdTracking = limitAdTracking
     event.vendorId = vendorId
     event.appInstanceId = appInstanceId
     event.consent = consentData
@@ -163,10 +165,17 @@ public actor AdvenueEngine {
   /// Identity attached to every subsequent event. Not persisted: it is
   /// re-resolved each launch, because ATT status and the vendor id can both
   /// change between them.
-  public func setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?) {
+  /// B2: rıza bayrağı — her olaya işlenir, persist edilmez (kimlik gibi).
+  private var limitAdTracking: Bool?
+
+  public func setIdentity(
+    idfa: String?, vendorId: String?, appInstanceId: String?,
+    limitAdTracking: Bool? = nil
+  ) {
     self.idfa = idfa
     self.vendorId = vendorId
     self.appInstanceId = appInstanceId
+    self.limitAdTracking = limitAdTracking
   }
 
   /// The Firebase App Instance ID alone. Separate from `setIdentity` because it
@@ -206,6 +215,8 @@ public actor AdvenueEngine {
     event.sdkVersion = config.sdkVersion
     event.customerUserId = customerUserId
     event.idfa = idfa
+    // B2: rıza bayrağı install olayına da işlenir.
+    event.limitAdTracking = limitAdTracking
     event.vendorId = vendorId
     event.appInstanceId = appInstanceId
     event.consent = consentData
@@ -347,6 +358,11 @@ public actor AdvenueEngine {
 
 
   public func setUserId(_ id: String?) {
+    // B6: 128 üstü id tüm batch'i 400'e düşürür. Reddet, persist etme.
+    if let id, id.count > 128 {
+      onError("account.setUserId:id_too_long", IngestError(status: 400))
+      return
+    }
     customerUserId = id
     if let id {
       store.set(id, forKey: USER_ID_KEY)
@@ -477,7 +493,7 @@ public enum Command: Sendable {
   case foreground
   case background
   case flush
-  case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?)
+  case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?, limitAdTracking: Bool? = nil)
   case setAppInstanceId(String?)
   case setConsentData(Consent?)
   case setPushToken(token: String?, provider: String?)
@@ -543,8 +559,10 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.notifyBackground()
     case .flush:
       await engine.flush()
-    case .setIdentity(let idfa, let vendorId, let appInstanceId):
-      await engine.setIdentity(idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId)
+    case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking):
+      await engine.setIdentity(
+        idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId,
+        limitAdTracking: limitAdTracking)
     case .setAppInstanceId(let id):
       await engine.setAppInstanceId(id)
     case .trackInstall(let token, let attestation, let challenge):

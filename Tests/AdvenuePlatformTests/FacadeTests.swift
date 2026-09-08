@@ -69,6 +69,17 @@ final class FacadeTests: XCTestCase {
       "a cold start from a link runs the app delegate before initialize, and those are exactly the links that carry attribution")
   }
 
+  /// B3: query'deki token/e-posta ham gönderilmez.
+  func testDeepLinkQueryIsStripped() {
+    let state = FacadeState()
+    XCTAssertEqual(
+      state.stripUrlQuery(URL(string: "advenue://open?token=secret&email=a@b.com")!),
+      "advenue://open")
+    XCTAssertEqual(
+      state.stripUrlQuery(URL(string: "https://go.advenue.io/abc")!),
+      "https://go.advenue.io/abc")
+  }
+
   func testTrackBeforeInitializeDoesNotCrash() {
     Advenue.shutdown()
     Advenue.track("too_early")
@@ -81,6 +92,14 @@ final class FacadeTests: XCTestCase {
   func testVersionIsStampedAndParsable() {
     XCTAssertFalse(AdvenueVersion.current.isEmpty)
     XCTAssertEqual(AdvenueVersion.current.split(separator: ".").count, 3)
+  }
+
+  /// B5: `http://` kuralı.
+  func testInsecureEndpointRule() {
+    XCTAssertTrue(AdvenueConfig.isSecureEndpoint("https://ingest.advenue.io"))
+    XCTAssertTrue(AdvenueConfig.isSecureEndpoint("HTTPS://x.test/y"))
+    XCTAssertFalse(AdvenueConfig.isSecureEndpoint("http://localhost:8080"))
+    XCTAssertFalse(AdvenueConfig.isSecureEndpoint("ftp://x"))
   }
 }
 

@@ -14,11 +14,14 @@ public struct Enrichment: Sendable, Equatable {
   public var vendorId: String?
   public var appInstanceId: String?
   public var adservicesToken: String?
+  /// B2: reklam takibi sınırlama bayrağı — düşürülüyordu, artık olaya işlenir.
+  public var limitAdTracking: Bool
 
   public init(
     idfa: String? = nil, vendorId: String? = nil,
     appInstanceId: String? = nil, adservicesToken: String? = nil,
-    attestation: AttestationResult? = nil, attestationChallenge: String? = nil
+    attestation: AttestationResult? = nil, attestationChallenge: String? = nil,
+    limitAdTracking: Bool = false
   ) {
     self.attestation = attestation
     self.attestationChallenge = attestationChallenge
@@ -26,6 +29,7 @@ public struct Enrichment: Sendable, Equatable {
     self.vendorId = vendorId
     self.appInstanceId = appInstanceId
     self.adservicesToken = adservicesToken
+    self.limitAdTracking = limitAdTracking
   }
 }
 
@@ -35,6 +39,9 @@ public struct Enrichment: Sendable, Equatable {
 public struct EnrichmentSources: Sendable {
   public var searchAdsToken: @Sendable () async -> String?
   public var advertisingId: @Sendable () -> (idfa: String?, vendorId: String?)
+  /// B2: ATT sınırlama bayrağı. Ayrı kapanış — advertisingId demetini
+  /// değiştirmek mevcut sahte kaynakları kırardı.
+  public var limitAdTracking: @Sendable () -> Bool
   public var appInstanceId: @Sendable () async -> String?
   /// Returns the attested challenge and its result, or nil. Every failure path
   /// — unsupported device, challenge fetch, attest — yields nil, because an
@@ -47,12 +54,14 @@ public struct EnrichmentSources: Sendable {
     appInstanceId: @escaping @Sendable () async -> String?,
     attestation: @escaping @Sendable () async -> (challenge: String, result: AttestationResult)? = {
       nil
-    }
+    },
+    limitAdTracking: @escaping @Sendable () -> Bool = { false }
   ) {
     self.searchAdsToken = searchAdsToken
     self.advertisingId = advertisingId
     self.appInstanceId = appInstanceId
     self.attestation = attestation
+    self.limitAdTracking = limitAdTracking
   }
 
   /// Production wiring. `AdvertisingIdentity.advertisingId` already returns nil
@@ -69,7 +78,8 @@ public struct EnrichmentSources: Sendable {
         return (idfa: identity.advertisingId, vendorId: identity.vendorId)
       },
       appInstanceId: { await appInstanceIdProvider?() },
-      attestation: { await attestation?() })
+      attestation: { await attestation?() },
+      limitAdTracking: { AdvertisingIdentity().limitAdTracking })
   }
 }
 
@@ -86,7 +96,9 @@ public func collectEnrichment(
 ) async -> Enrichment {
   // Synchronous reads; no reason to race them.
   let ids = sources.advertisingId()
-  var result = Enrichment(idfa: ids.idfa, vendorId: ids.vendorId)
+  var result = Enrichment(
+    idfa: ids.idfa, vendorId: ids.vendorId,
+    limitAdTracking: sources.limitAdTracking())
 
   await withTaskGroup(of: (String, String?).self) { group in
     group.addTask { ("adservices", await sources.searchAdsToken()) }

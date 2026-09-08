@@ -90,6 +90,28 @@ final class InstallTests: XCTestCase {
   /// The AdServices token belongs to the install alone: it is an attribution
   /// input, not a per-event property, and repeating it on every event would put
   /// an opaque token in every request for nothing.
+  /// B2: rıza bayrağı düşürülmüyor — olaya işlenir.
+  func testLimitAdTrackingRidesEveryEvent() async {
+    let store = MemoryStore()
+    let e = engine(store)
+    await e.setIdentity(
+      idfa: "IDFA-1", vendorId: "VID-1", appInstanceId: nil, limitAdTracking: true)
+    await e.track("purchase")
+
+    let events = await e.pendingEvents()
+    XCTAssertEqual(events.first?.limitAdTracking, true)
+  }
+
+  func testLimitAdTrackingAbsentStaysAbsent() async {
+    let store = MemoryStore()
+    let e = engine(store)
+    await e.setIdentity(idfa: "IDFA-1", vendorId: "VID-1", appInstanceId: nil)
+    await e.track("purchase")
+
+    let events = await e.pendingEvents()
+    XCTAssertNil(events.first?.limitAdTracking)
+  }
+
   func testAdservicesTokenRidesOnlyTheInstall() async {
     let store = MemoryStore()
     let e = engine(store)

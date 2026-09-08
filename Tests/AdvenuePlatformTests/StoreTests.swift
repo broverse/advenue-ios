@@ -70,4 +70,43 @@ final class StoreTests: XCTestCase {
   func testUnavailableIsNotAbsent() {
     XCTAssertNotEqual(SecureReadResult.unavailable, SecureReadResult.absent)
   }
+
+  /// B4: kuyruk blob'u dosyalarda tur atar.
+  func testCacheFileStoreRoundTrips() throws {
+    let dir = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let store = CacheFileStore(directory: dir)
+    XCTAssertNil(store.string(forKey: "advenue.queue"))
+    store.set("[1]", forKey: "advenue.queue")
+    XCTAssertEqual(store.string(forKey: "advenue.queue"), "[1]")
+    store.removeObject(forKey: "advenue.queue")
+    XCTAssertNil(store.string(forKey: "advenue.queue"))
+  }
+
+  /// B4: yönlendirme — kuyruk dosyaya, gerisi UserDefaults'a.
+  func testCompositeStoreRoutesQueueToFiles() throws {
+    let dir = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let defaults = UserDefaultsStore(suiteName: "io.advenue.test-b4")
+    let store = CompositeStore(defaults: defaults, files: CacheFileStore(directory: dir))
+    store.set("Q", forKey: "advenue.queue")
+    store.set("D", forKey: "other.key")
+    XCTAssertEqual(store.string(forKey: "advenue.queue"), "Q")
+    XCTAssertEqual(store.string(forKey: "other.key"), "D")
+    XCTAssertNil(defaults.string(forKey: "advenue.queue"), "kuyruk defaults'a yazılmamalı")
+  }
+
+  /// B4: eski UserDefaults blob'u ilk okumada migrate edilir.
+  func testCompositeStoreMigratesLegacyQueue() throws {
+    let dir = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let defaults = UserDefaultsStore(suiteName: "io.advenue.test-b4m")
+    defaults.set("LEGACY", forKey: "advenue.queue")
+    let store = CompositeStore(defaults: defaults, files: CacheFileStore(directory: dir))
+    XCTAssertEqual(store.string(forKey: "advenue.queue"), "LEGACY")
+    XCTAssertNil(
+      defaults.string(forKey: "advenue.queue"), "migrate sonrası eski anahtar silinir")
+    XCTAssertEqual(
+      CacheFileStore(directory: dir).string(forKey: "advenue.queue"), "LEGACY")
+  }
 }
