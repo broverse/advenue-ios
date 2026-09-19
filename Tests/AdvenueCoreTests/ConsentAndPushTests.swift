@@ -107,6 +107,7 @@ final class ConsentAndPushTests: XCTestCase {
     let e = engine(MemoryStore())
     await e.setUserId(String(repeating: "u", count: 129))
     await e.track("purchase")
-    XCTAssertNil(await e.pendingEvents().first?.customerUserId)
+    let userId = await e.pendingEvents().first?.customerUserId
+    XCTAssertNil(userId)
   }
 }
