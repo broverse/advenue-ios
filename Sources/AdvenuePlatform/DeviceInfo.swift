@@ -5,6 +5,18 @@ import Foundation
   import UIKit
 #endif
 
+/// The app's own version (`CFBundleShortVersionString`) for every event's
+/// top-level `appVersion`. Resolved by the SDK, never taken from the app: the
+/// React Native 0.x layer filled it this way, and 1.0 relying on the config
+/// instead left every event unversioned (2026-09-19). Nil when the bundle has
+/// no version.
+public func readAppVersion() -> String? {
+  guard let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+    !short.isEmpty
+  else { return nil }
+  return short
+}
+
 /// Device metadata for Meta CAPI `extinfo`.
 ///
 /// Best-effort per field: a field is **omitted**, never defaulted, when its

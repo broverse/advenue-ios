@@ -58,6 +58,14 @@ actor RecordingSkanReporter: SkanReporter {
 /// working. Unit coverage of every component says nothing about the seams
 /// between them, so this asserts the seam directly: an event handed to the
 /// public facade reaches a transport.
+/// Collects onError contexts from whatever thread the SDK reports on.
+final class ErrorContexts: @unchecked Sendable {
+  private let lock = NSLock()
+  private var contexts: [String] = []
+  func add(_ context: String) { lock.lock(); contexts.append(context); lock.unlock() }
+  var all: [String] { lock.lock(); defer { lock.unlock() }; return contexts }
+}
+
 final class SeamTests: XCTestCase {
   /// The install is once per installation, and the host test process shares one
   /// real UserDefaults suite across runs — so the first run writes the flag and
@@ -291,6 +299,49 @@ final class SeamTests: XCTestCase {
     try await Self.until(timeout: 5) { await !transport.events.isEmpty }
     let event = await transport.events.first
     XCTAssertEqual(event?.sdkVersion, AdvenueVersion.current)
+  }
+
+  /// The app version is the SDK's to resolve, never the app's to supply.
+  ///
+  /// 1.0 shipped reading it only from the config, so apps that didn't pass one
+  /// sent every event unversioned (2026-09-19). A config value is ignored and
+  /// reported, not trusted. The bundle reader is injected: under XCTest
+  /// `Bundle.main` is the test runner, not an app.
+  func testTheAppVersionComesFromTheBundleAndAConfigValueIsIgnoredAndReported() async throws {
+    let transport = RecordingEventTransport()
+    let errors = ErrorContexts()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", onError: { context, _ in errors.add(context) })
+    config.flushIntervalMs = 0
+    config.appVersion = "9.9.9"
+    state.start(config, transport: transport, appVersion: { "3.4.5" })
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "purchase", properties: nil, type: "custom"))
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.events.isEmpty }
+    let event = await transport.events.first
+    XCTAssertEqual(event?.appVersion, "3.4.5")
+    XCTAssertTrue(errors.all.contains("config.ignored:appVersion"))
+  }
+
+  func testNoConfigAppVersionMeansNothingIsReported() async throws {
+    let transport = RecordingEventTransport()
+    let errors = ErrorContexts()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", onError: { context, _ in errors.add(context) })
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, appVersion: { "3.4.5" })
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "purchase", properties: nil, type: "custom"))
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.events.isEmpty }
+    let event = await transport.events.first
+    XCTAssertEqual(event?.appVersion, "3.4.5")
+    XCTAssertFalse(errors.all.contains("config.ignored:appVersion"))
   }
 
   /// Apple wants registration at first launch; a late call loses the

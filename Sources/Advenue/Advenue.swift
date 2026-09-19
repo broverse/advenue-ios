@@ -210,10 +210,19 @@ final class FacadeState: @unchecked Sendable {
     _ config: AdvenueConfig,
     transport: (any EventTransport)? = nil,
     sources: EnrichmentSources? = nil,
-    skan skanReporter: (any SkanReporter)? = nil
+    skan skanReporter: (any SkanReporter)? = nil,
+    appVersion readVersion: () -> String? = readAppVersion
   ) {
     // Replace-and-shut-down, never add.
     stop()
+
+    // The SDK resolves the app version itself (readAppVersion); a config value
+    // is ignored — and said so, rather than looking like it took effect.
+    if config.appVersion != nil {
+      config.onError(
+        "config.ignored:appVersion",
+        IngestError(status: 0))
+    }
 
     // B4: kuyruk blob'u Caches dosyalarına (yedek dışı); UserDefaults'ta
     // kalan eski blob ilk okumada migrate edilir. Caches yoksa UserDefaults
@@ -256,7 +265,7 @@ final class FacadeState: @unchecked Sendable {
     let engine = AdvenueEngine(
       config: EngineConfig(
         apiKey: config.apiKey, platform: "ios", deviceId: deviceId,
-        installationId: installationId, appVersion: config.appVersion,
+        installationId: installationId, appVersion: readVersion(),
         osVersion: osVersion,
         sdkVersion: String((config.sdkVersion ?? AdvenueVersion.current).prefix(32)),
         requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,

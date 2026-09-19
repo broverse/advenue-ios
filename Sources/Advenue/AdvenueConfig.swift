@@ -5,6 +5,8 @@ import Foundation
 public struct AdvenueConfig: Sendable {
   public var apiKey: String
   public var endpoint: String
+  /// Ignored: the SDK reads the app version from the bundle itself. Setting it
+  /// reports `config.ignored:appVersion` through `onError`. Removed in the next major.
   public var appVersion: String?
   public var requireConsent: Bool
   public var sessionWindowMs: Int64
