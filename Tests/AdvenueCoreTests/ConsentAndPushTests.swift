@@ -102,6 +102,17 @@ final class ConsentAndPushTests: XCTestCase {
     XCTAssertNil(token)
   }
 
+  /// Erasure leaves no queue blob behind. `queue.clear()` persists an empty
+  /// queue synchronously, so without an explicit removal the key survived
+  /// forgetMe (caught on Android by FacadeSeamTest, 2026-09-19).
+  func testForgetMeLeavesNoQueueBlob() async {
+    let store = MemoryStore()
+    let e = engine(store)
+    await e.track("purchase")
+    await e.forgetMe()
+    XCTAssertNil(store.string(forKey: QUEUE_KEY))
+  }
+
   /// B6: 128 üstü userId batch'i 400'e düşürür — reddedilir, persist edilmez.
   func testAnOverLongUserIdIsRejected() async {
     let e = engine(MemoryStore())

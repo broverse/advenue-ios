@@ -384,7 +384,9 @@ public actor AdvenueEngine {
     pushToken = nil
     pushProvider = nil
     customerUserId = nil
-    for key in [CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY] {
+    // QUEUE_KEY last: queue.clear() above persists an empty blob synchronously,
+    // and `forgotten` stops every later enqueue, so nothing rewrites it.
+    for key in [CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY, QUEUE_KEY] {
       store.removeObject(forKey: key)
     }
   }
