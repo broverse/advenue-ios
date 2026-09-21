@@ -18,17 +18,29 @@ public struct HttpChallengeFetcher: ChallengeSource {
     self.session = session
   }
 
-  public func challenge(deviceId: String) async throws -> String {
+  /// The exact request this fetcher would send. Public so a test can assert
+  /// the wire shape without a network round trip.
+  ///
+  /// Sends `?platform=ios`: this fetcher is iOS-only by construction, and a
+  /// project-scoped key otherwise cannot resolve a listing on a normal
+  /// two-listing (iOS + Android) product — see `resolveProjectListing` in
+  /// apps/ingestion/src/app.ts, which 400s an ambiguous project key rather
+  /// than guess.
+  public func buildRequest(deviceId: String) -> URLRequest {
     let escaped =
       deviceId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? deviceId
     var request = URLRequest(
-      url: URL(string: "\(endpoint)/v1/attest/challenge?deviceId=\(escaped)")!)
+      url: URL(string: "\(endpoint)/v1/attest/challenge?deviceId=\(escaped)&platform=ios")!)
     request.httpMethod = "GET"
     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
     // Matches the deadline the RN SDK uses. Attestation is enrichment: it never
     // holds the install.
     request.timeoutInterval = 5
+    return request
+  }
 
+  public func challenge(deviceId: String) async throws -> String {
+    let request = buildRequest(deviceId: deviceId)
     let (payload, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse,
       (200..<300).contains(http.statusCode)

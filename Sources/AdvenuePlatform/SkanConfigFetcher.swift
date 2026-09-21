@@ -23,12 +23,24 @@ public struct HttpSkanConfigFetcher: SkanConfigSource {
     self.session = session
   }
 
-  public func fetch(etag: String?) async throws -> SkanConfigResult {
-    var request = URLRequest(url: URL(string: "\(endpoint)/v1/sdk-config")!)
+  /// The exact request this fetcher would send. Public so a test can assert
+  /// the wire shape without a network round trip.
+  ///
+  /// Sends `?platform=ios`: this fetcher is iOS-only by construction, and a
+  /// project-scoped key otherwise cannot resolve a listing on a normal
+  /// two-listing (iOS + Android) product — see `resolveProjectListing` in
+  /// apps/ingestion/src/app.ts, which 400s an ambiguous project key rather
+  /// than guess.
+  public func buildRequest(etag: String?) -> URLRequest {
+    var request = URLRequest(url: URL(string: "\(endpoint)/v1/sdk-config?platform=ios")!)
     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
     if let etag { request.setValue(etag, forHTTPHeaderField: "if-none-match") }
     request.timeoutInterval = Double(SKAN_CONFIG_TIMEOUT_MS) / 1000
+    return request
+  }
 
+  public func fetch(etag: String?) async throws -> SkanConfigResult {
+    let request = buildRequest(etag: etag)
     let (payload, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse else { throw IngestError(status: 408) }
     if http.statusCode == 304 { return .notModified }
