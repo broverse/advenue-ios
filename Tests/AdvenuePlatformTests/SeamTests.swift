@@ -260,6 +260,30 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(names.contains("session_end"), "an interruption must not end the session")
   }
 
+  /// The public `notifyForeground()` goes through the same tracker as UIKit's
+  /// own signals. Called while already foregrounded — an app that forwards
+  /// `sceneDidBecomeActive` right after `initialize` — it used to reach the
+  /// engine directly, which read the still-open session as a killed app and
+  /// emitted a synthetic `session_end` plus a second `session_start`.
+  func testAManualForegroundWhileForegroundedDoesNotSplitTheSession() async throws {
+    let transport = RecordingTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.notifyForeground()
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.seen.isEmpty }
+    let names = await transport.seen.flatMap { $0 }
+    // No start count: the persisted queue is shared across cases, so an earlier
+    // case's unsent session_start can ride along. The split always shows up as
+    // the synthetic session_end.
+    XCTAssertFalse(names.contains("session_end"), "a repeated foreground must not end the session")
+  }
+
   /// A wrapper's version must reach the wire, not the native SDK's.
   ///
   /// An event stamped `0.1.0` says "the Swift SDK", which is true of every

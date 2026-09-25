@@ -131,14 +131,11 @@ public enum Advenue {
   /// is empty or a backoff window is open.
   public static func flush() { state.submit(.flush) }
 
-  public static func notifyForeground() { state.submit(.foreground) }
+  public static func notifyForeground() { state.notifyForeground() }
 
   /// Backgrounding both closes the session and flushes: a batch stranded at the
   /// moment the app leaves the foreground may not be sent for hours.
-  public static func notifyBackground() {
-    state.submit(.background)
-    state.submit(.flush)
-  }
+  public static func notifyBackground() { state.notifyBackground() }
 
   /// Presents the ATT prompt. The app decides when; the SDK never prompts on
   /// its own.
@@ -594,6 +591,12 @@ final class FacadeState: @unchecked Sendable {
       lock.unlock()
     #endif
   }
+
+  /// The public lifecycle calls go through the same tracker as UIKit's signals,
+  /// so one forwarded while already foregrounded (or already backgrounded) is a
+  /// no-op instead of a session split.
+  func notifyForeground() { handle(.didBecomeActive) }
+  func notifyBackground() { handle(.didEnterBackground) }
 
   /// Applies one lifecycle signal. Public routing lives here rather than in the
   /// observer closure so a test can drive it without UIKit.
