@@ -360,7 +360,10 @@ final class FacadeState: @unchecked Sendable {
     log(
       "[Advenue] initialized — endpoint \(config.endpoint), "
         + "sdk \(config.sdkVersion ?? AdvenueVersion.current), "
-        + (inForeground ? "foreground launch" : "background launch, no session yet"))
+        // Not "background launch": a scene-based (SwiftUI) app is still
+        // reported in the background during didFinishLaunching even when the
+        // user opened it. Either way the session opens on activation.
+        + (inForeground ? "launched active" : "not active yet, the session opens on activation"))
 
     if config.flushIntervalMs > 0 {
       let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
