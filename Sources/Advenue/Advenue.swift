@@ -166,10 +166,14 @@ final class AcceptedAppId: @unchecked Sendable {
     return value
   }
 
-  func set(_ appId: String) {
+  /// True the first time this app id is seen.
+  @discardableResult
+  func set(_ appId: String) -> Bool {
     lock.lock()
+    defer { lock.unlock() }
+    let changed = value != appId
     value = appId
-    lock.unlock()
+    return changed
   }
 }
 
@@ -209,10 +213,15 @@ final class FacadeState: @unchecked Sendable {
     sources: EnrichmentSources? = nil,
     skan skanReporter: (any SkanReporter)? = nil,
     appVersion readVersion: () -> String? = readAppVersion,
-    launchedInBackground: () -> Bool = readLaunchedInBackground
+    launchedInBackground: () -> Bool = readLaunchedInBackground,
+    logSink: (any AdvenueLogSink)? = nil
   ) {
     // Replace-and-shut-down, never add.
     stop()
+
+    // `debug`: every swallowed failure goes through onError, so logging there
+    // covers all of them — wrapped once, before anything below captures it.
+    let (config, log) = withDebugLogging(config, sink: logSink)
 
     // The SDK resolves the app version itself (readAppVersion); a config value
     // is ignored — and said so, rather than looking like it took effect.
@@ -251,14 +260,19 @@ final class FacadeState: @unchecked Sendable {
       osVersion = nil
     #endif
 
-    let eventTransport =
+    let baseTransport =
       transport
       ?? HttpTransport(
         endpoint: config.endpoint, apiKey: config.apiKey,
         signingSecret: config.signingSecret,
         // Diagnostics only: it runs after the batch is already accepted, so
         // nothing it does can turn a successful ingest into a failure.
-        onAccepted: { [acceptedAppId] appId in acceptedAppId.set(appId) })
+        onAccepted: { [acceptedAppId] appId in
+          // A key pasted from the wrong app is otherwise silent.
+          if acceptedAppId.set(appId) { log("[Advenue] ingesting into app \(appId)") }
+        })
+    let eventTransport: any EventTransport =
+      config.debug ? LoggingTransport(inner: baseTransport, log: log) : baseTransport
 
     let engine = AdvenueEngine(
       config: EngineConfig(
@@ -342,6 +356,11 @@ final class FacadeState: @unchecked Sendable {
     // Seeded to match: the line above IS this launch's foreground, so the
     // activation notification that follows must not open a second session.
     observeLifecycle(seededInForeground: inForeground)
+
+    log(
+      "[Advenue] initialized — endpoint \(config.endpoint), "
+        + "sdk \(config.sdkVersion ?? AdvenueVersion.current), "
+        + (inForeground ? "foreground launch" : "background launch, no session yet"))
 
     if config.flushIntervalMs > 0 {
       let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))

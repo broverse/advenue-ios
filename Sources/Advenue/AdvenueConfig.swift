@@ -31,6 +31,12 @@ public struct AdvenueConfig: Sendable {
   /// Called when the SDK swallows a best-effort failure. Never receives PII.
   public var onError: @Sendable (String, any Error) -> Void
 
+  /// Development aid: logs the SDK's start, every failure `onError` sees and
+  /// each accepted batch to the unified log (subsystem `io.advenue.sdk`) —
+  /// Xcode's console and Console.app. Never logs an identifier or a payload.
+  /// Leave off in production; route failures through `onError` instead.
+  public var debug: Bool
+
   /// Overrides the version stamped on every event. Set by a WRAPPER SDK, never
   /// by an app.
   ///
@@ -63,7 +69,8 @@ public struct AdvenueConfig: Sendable {
     conversionValues: ConversionValueConfig? = nil,
     onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in },
     sdkVersion: String? = nil,
-    allowInsecureHttp: Bool = false
+    allowInsecureHttp: Bool = false,
+    debug: Bool = false
   ) {
     precondition(
       allowInsecureHttp || Self.isSecureEndpoint(endpoint),
@@ -72,6 +79,7 @@ public struct AdvenueConfig: Sendable {
     self.endpoint = endpoint
     self.appVersion = appVersion
     self.requireConsent = requireConsent
+    self.debug = debug
     self.sessionWindowMs = sessionWindowMs
     self.batchSize = batchSize
     self.flushIntervalMs = flushIntervalMs

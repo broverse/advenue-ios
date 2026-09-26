@@ -307,6 +307,42 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(names.contains("session_end"), "a background launch has no session to end")
   }
 
+  /// `debug` is the integrator's window into an SDK that otherwise swallows
+  /// every failure: it logs the start, each swallowed failure (everything
+  /// `onError` sees) and each accepted batch.
+  func testDebugLogsTheStartFailuresAndSentBatches() async throws {
+    let transport = RecordingTransport()
+    let sink = RecordingLogSink()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", debug: true)
+    config.flushIntervalMs = 0
+    config.appVersion = "9.9.9"  // ignored, and reported through onError
+    state.start(config, transport: transport, logSink: sink)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.flush)
+    try await Self.until(timeout: 5) { sink.lines.contains { $0.contains("sent") } }
+    let lines = sink.lines
+    XCTAssertTrue(lines.contains { $0.contains("initialized") }, "\(lines)")
+    XCTAssertTrue(lines.contains { $0.contains("config.ignored:appVersion") }, "\(lines)")
+  }
+
+  /// Off by default, and silent: production apps get no log lines.
+  func testDebugOffLogsNothing() async throws {
+    let transport = RecordingTransport()
+    let sink = RecordingLogSink()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    config.appVersion = "9.9.9"
+    state.start(config, transport: transport, logSink: sink)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.flush)
+    try await Self.until(timeout: 5) { await !transport.seen.isEmpty }
+    XCTAssertEqual(sink.lines, [])
+  }
+
   /// A wrapper's version must reach the wire, not the native SDK's.
   ///
   /// An event stamped `0.1.0` says "the Swift SDK", which is true of every
@@ -520,5 +556,21 @@ final class SeamTests: XCTestCase {
       try await Task.sleep(nanoseconds: 20_000_000)
     }
     XCTFail("condition never became true within \(timeout)s")
+  }
+}
+
+/// Collects debug log lines.
+final class RecordingLogSink: AdvenueLogSink, @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: [String] = []
+  var lines: [String] {
+    lock.lock()
+    defer { lock.unlock() }
+    return stored
+  }
+  func log(_ message: String) {
+    lock.lock()
+    stored.append(message)
+    lock.unlock()
   }
 }
