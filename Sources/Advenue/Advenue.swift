@@ -208,7 +208,8 @@ final class FacadeState: @unchecked Sendable {
     transport: (any EventTransport)? = nil,
     sources: EnrichmentSources? = nil,
     skan skanReporter: (any SkanReporter)? = nil,
-    appVersion readVersion: () -> String? = readAppVersion
+    appVersion readVersion: () -> String? = readAppVersion,
+    launchedInBackground: () -> Bool = readLaunchedInBackground
   ) {
     // Replace-and-shut-down, never add.
     stop()
@@ -332,10 +333,15 @@ final class FacadeState: @unchecked Sendable {
     // Replayed in arrival order, before the first session, so a deferred deep
     // link is attributed to the launch it belongs to.
     for url in buffered { send(url) }
-    pipe.submit(.foreground)
+    // A launch into the background (fetch, silent push, location) is not a
+    // session: the first didBecomeActive opens it instead. iOS posts no
+    // didEnterBackground for an app that never left the background, so a
+    // tracker seeded as foregrounded would swallow the user's real open.
+    let inForeground = !launchedInBackground()
+    if inForeground { pipe.submit(.foreground) }
     // Seeded to match: the line above IS this launch's foreground, so the
     // activation notification that follows must not open a second session.
-    observeLifecycle(seededInForeground: true)
+    observeLifecycle(seededInForeground: inForeground)
 
     if config.flushIntervalMs > 0 {
       let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))

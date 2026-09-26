@@ -17,6 +17,25 @@ public func readAppVersion() -> String? {
   return short
 }
 
+/// Whether this process was launched into the background — background fetch,
+/// a silent push, a location relaunch — rather than opened by the user. Read
+/// through the runtime, not `UIApplication.shared`: that symbol is unavailable
+/// in an app extension and merely referencing it there fails to link. False
+/// wherever it cannot be known (an extension, off the main thread, macOS),
+/// which keeps the pre-existing behaviour: the launch is a foreground.
+public func readLaunchedInBackground() -> Bool {
+  #if canImport(UIKit) && !os(watchOS)
+    guard Thread.isMainThread, !Bundle.main.bundlePath.hasSuffix(".appex") else { return false }
+    let selector = NSSelectorFromString("sharedApplication")
+    guard UIApplication.responds(to: selector),
+      let app = UIApplication.perform(selector)?.takeUnretainedValue() as? UIApplication
+    else { return false }
+    return app.applicationState == .background
+  #else
+    return false
+  #endif
+}
+
 /// Device metadata for Meta CAPI `extinfo`.
 ///
 /// Best-effort per field: a field is **omitted**, never defaulted, when its

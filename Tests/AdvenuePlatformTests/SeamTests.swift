@@ -284,6 +284,29 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(names.contains("session_end"), "a repeated foreground must not end the session")
   }
 
+  /// A launch into the background — background fetch, a silent push, a
+  /// location relaunch — is not a session. `initialize` runs in
+  /// didFinishLaunching either way, and it used to open a session and seed the
+  /// tracker as foregrounded unconditionally: the phantom session carried the
+  /// background launch's time, and since iOS posts no didEnterBackground for an
+  /// app that never left it, the user's real open later was swallowed as a
+  /// repeat. A backgrounding signal here must find no session to close.
+  func testABackgroundLaunchOpensNoSession() async throws {
+    let transport = RecordingTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, launchedInBackground: { true })
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.handle(.didEnterBackground)
+    state.submit(.flush)
+
+    try await Self.until(timeout: 5) { await !transport.seen.isEmpty }
+    let names = await transport.seen.flatMap { $0 }
+    XCTAssertFalse(names.contains("session_end"), "a background launch has no session to end")
+  }
+
   /// A wrapper's version must reach the wire, not the native SDK's.
   ///
   /// An event stamped `0.1.0` says "the Swift SDK", which is true of every
