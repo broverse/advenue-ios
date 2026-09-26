@@ -327,6 +327,23 @@ final class SeamTests: XCTestCase {
     XCTAssertTrue(lines.contains { $0.contains("config.ignored:appVersion") }, "\(lines)")
   }
 
+  /// A setup condition is reported as what it is, not as a transport error:
+  /// `IngestError(status: 0)` printed as an HTTP failure that never happened
+  /// and said nothing about the cause (a locked Keychain, an unsigned build).
+  func testSetupConditionsAreReportedAsThemselves() async throws {
+    let seen = ContextRecorder()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", onError: { seen.add($0, $1) })
+    config.flushIntervalMs = 0
+    config.appVersion = "9.9.9"
+    state.start(config, transport: RecordingTransport())
+
+    let error = try XCTUnwrap(seen.errors["config.ignored:appVersion"])
+    XCTAssertEqual(error as? AdvenueSetupError, .appVersionIgnored)
+    XCTAssertTrue("\(AdvenueSetupError.identityDeferred)".contains("Keychain"))
+    XCTAssertFalse("\(AdvenueSetupError.identityDeferred)".contains("status"))
+  }
+
   /// Off by default, and silent: production apps get no log lines.
   func testDebugOffLogsNothing() async throws {
     let transport = RecordingTransport()
@@ -571,6 +588,22 @@ final class RecordingLogSink: AdvenueLogSink, @unchecked Sendable {
   func log(_ message: String) {
     lock.lock()
     stored.append(message)
+    lock.unlock()
+  }
+}
+
+/// Collects what `onError` receives, by context.
+final class ContextRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: [String: any Error] = [:]
+  var errors: [String: any Error] {
+    lock.lock()
+    defer { lock.unlock() }
+    return stored
+  }
+  func add(_ context: String, _ error: any Error) {
+    lock.lock()
+    stored[context] = error
     lock.unlock()
   }
 }

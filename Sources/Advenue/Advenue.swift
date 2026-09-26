@@ -226,9 +226,7 @@ final class FacadeState: @unchecked Sendable {
     // The SDK resolves the app version itself (readAppVersion); a config value
     // is ignored — and said so, rather than looking like it took effect.
     if config.appVersion != nil {
-      config.onError(
-        "config.ignored:appVersion",
-        IngestError(status: 0))
+      config.onError("config.ignored:appVersion", AdvenueSetupError.appVersionIgnored)
     }
 
     // B4: kuyruk blob'u Caches dosyalarına (yedek dışı); UserDefaults'ta
@@ -239,7 +237,7 @@ final class FacadeState: @unchecked Sendable {
       store = CompositeStore(files: files)
     } else {
       store = UserDefaultsStore()
-      config.onError("store.cache_unavailable", IngestError(status: 0))
+      config.onError("store.cache_unavailable", AdvenueSetupError.cacheUnavailable)
     }
     let secure = KeychainStore()
     let uuid = SystemUUIDs()
@@ -249,7 +247,7 @@ final class FacadeState: @unchecked Sendable {
       // Deferred: the Keychain could not be read. Nothing is minted and
       // nothing starts, so no event carries an invented identifier. The next
       // launch after first unlock resolves it.
-      config.onError("identity.deferred", IngestError(status: 0))
+      config.onError("identity.deferred", AdvenueSetupError.identityDeferred)
       return
     }
 
