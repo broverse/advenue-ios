@@ -109,6 +109,17 @@ final class SeamTests: XCTestCase {
     }
   }
 
+  /// Enrichment that settles at once, for every case that is not about
+  /// enrichment. The default `.system()` sources ask AdServices for a token,
+  /// which a test host never answers inside the 3 s install window — and since
+  /// F-SDK-3 the install hold keeps every flush back until enrichment settles.
+  /// So each such case paid the full window against its 5 s `until` budget,
+  /// ran ~3.1 s when idle, and timed out under load.
+  private static let settledSources = EnrichmentSources(
+    searchAdsToken: { nil },
+    advertisingId: { (idfa: nil, vendorId: nil) },
+    appInstanceId: { nil })
+
   /// Every `FacadeState` a test builds, so tearDown can stop it.
   ///
   /// `Advenue.shutdown()` alone was not enough and the gap was invisible: it
@@ -141,7 +152,7 @@ final class SeamTests: XCTestCase {
   func testTrackedEventReachesTheTransport() async throws {
     let transport = RecordingTransport()
     let state = newState()
-    state.start(AdvenueConfig(apiKey: "apk_live_x"), transport: transport)
+    state.start(AdvenueConfig(apiKey: "apk_live_x"), transport: transport, sources: Self.settledSources)
 
     // The invariant under test is the wiring, not the Keychain: an unsigned
     // simulator bundle cannot read it, and asserting an environment would make
@@ -227,7 +238,7 @@ final class SeamTests: XCTestCase {
   func testATrackedEventReachesTheSkanReporter() async throws {
     let reporter = RecordingSkanReporter()
     let state = newState()
-    state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
+    state.start(skanConfig(), transport: RecordingTransport(), sources: Self.settledSources, skan: reporter)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.recordSkan(event: "signup", revenueMicros: nil, revenueCurrency: nil))
@@ -259,7 +270,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport)
+    state.start(config, transport: transport, sources: Self.settledSources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.handle(.didEnterBackground)
@@ -277,7 +288,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport)
+    state.start(config, transport: transport, sources: Self.settledSources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.handle(.willResignActive)
@@ -299,7 +310,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport)
+    state.start(config, transport: transport, sources: Self.settledSources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.notifyForeground()
@@ -325,7 +336,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport, launchedInBackground: { true })
+    state.start(config, transport: transport, sources: Self.settledSources, launchedInBackground: { true })
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.handle(.didEnterBackground)
@@ -346,7 +357,7 @@ final class SeamTests: XCTestCase {
     var config = AdvenueConfig(apiKey: "apk_live_x", debug: true)
     config.flushIntervalMs = 0
     config.appVersion = "9.9.9"  // ignored, and reported through onError
-    state.start(config, transport: transport, logSink: sink)
+    state.start(config, transport: transport, sources: Self.settledSources, logSink: sink)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.flush)
@@ -365,7 +376,7 @@ final class SeamTests: XCTestCase {
     var config = AdvenueConfig(apiKey: "apk_live_x", onError: { seen.add($0, $1) })
     config.flushIntervalMs = 0
     config.appVersion = "9.9.9"
-    state.start(config, transport: RecordingTransport())
+    state.start(config, transport: RecordingTransport(), sources: Self.settledSources)
 
     let error = try XCTUnwrap(seen.errors["config.ignored:appVersion"])
     XCTAssertEqual(error as? AdvenueSetupError, .appVersionIgnored)
@@ -381,7 +392,7 @@ final class SeamTests: XCTestCase {
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
     config.appVersion = "9.9.9"
-    state.start(config, transport: transport, logSink: sink)
+    state.start(config, transport: transport, sources: Self.settledSources, logSink: sink)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.flush)
@@ -402,7 +413,7 @@ final class SeamTests: XCTestCase {
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
     config.sdkVersion = "react-native/0.9.0"
-    state.start(config, transport: transport)
+    state.start(config, transport: transport, sources: Self.settledSources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.track(name: "purchase", properties: nil, type: "custom"))
@@ -419,7 +430,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport)
+    state.start(config, transport: transport, sources: Self.settledSources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.track(name: "purchase", properties: nil, type: "custom"))
@@ -443,7 +454,7 @@ final class SeamTests: XCTestCase {
     var config = AdvenueConfig(apiKey: "apk_live_x", onError: { context, _ in errors.add(context) })
     config.flushIntervalMs = 0
     config.appVersion = "9.9.9"
-    state.start(config, transport: transport, appVersion: { "3.4.5" })
+    state.start(config, transport: transport, sources: Self.settledSources, appVersion: { "3.4.5" })
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.track(name: "purchase", properties: nil, type: "custom"))
@@ -461,7 +472,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x", onError: { context, _ in errors.add(context) })
     config.flushIntervalMs = 0
-    state.start(config, transport: transport, appVersion: { "3.4.5" })
+    state.start(config, transport: transport, sources: Self.settledSources, appVersion: { "3.4.5" })
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.track(name: "purchase", properties: nil, type: "custom"))
@@ -478,7 +489,7 @@ final class SeamTests: XCTestCase {
   func testRegistrationHappensAtStart() async throws {
     let reporter = RecordingSkanReporter()
     let state = newState()
-    state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
+    state.start(skanConfig(), transport: RecordingTransport(), sources: Self.settledSources, skan: reporter)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     try await Self.until(timeout: 5) { await reporter.registered > 0 }
@@ -490,7 +501,7 @@ final class SeamTests: XCTestCase {
   func testAFailedUpdateIsRetriedOnTheNextEvent() async throws {
     let reporter = RecordingSkanReporter(failNext: true)
     let state = newState()
-    state.start(skanConfig(), transport: RecordingTransport(), skan: reporter)
+    state.start(skanConfig(), transport: RecordingTransport(), sources: Self.settledSources, skan: reporter)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     state.submit(.recordSkan(event: "signup", revenueMicros: nil, revenueCurrency: nil))
@@ -564,7 +575,7 @@ final class SeamTests: XCTestCase {
     let state = newState()
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport)
+    state.start(config, transport: transport, sources: Self.settledSources)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     var components = URLComponents(string: "https://go.advenue.io/x")!
