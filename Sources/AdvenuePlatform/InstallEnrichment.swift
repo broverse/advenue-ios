@@ -5,6 +5,10 @@ import Foundation
 /// Spec §5: the install waits this long for enrichment and no longer. Matches
 /// the deadlines the RN SDK already uses (SKAN config 3000 ms).
 public let INSTALL_WINDOW_MS = 3_000
+/// How long past `INSTALL_WINDOW_MS` flushes stay held for a pending install —
+/// the enrichment deadline is checked by a task that still has to be
+/// scheduled and then hop through the command pipe.
+public let INSTALL_HOLD_MARGIN_MS = 2_000
 
 /// What the install event carries beyond the envelope every event has.
 public struct Enrichment: Sendable, Equatable {

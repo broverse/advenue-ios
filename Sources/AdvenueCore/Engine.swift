@@ -94,6 +94,14 @@ public actor AdvenueEngine {
     attestation: AttestationResult?, challenge: String?)?
   private var skan: SkanStateMachine?
   private var skanReporter: (any SkanReporter)?
+  /// F-SDK-3: when this launch began an install that is not recorded yet.
+  /// The install is stamped with it — the first open, not the moment the
+  /// enrichment that preceded it finished.
+  private var installStartedAtMs: Int64?
+  /// Flushes are held until the install is enqueued, so nothing reaches the
+  /// server ahead of it. Bounded: past this instant the hold lapses, because a
+  /// lost enrichment task must never strand the queue.
+  private var installHoldUntilMs: Int64?
   private var flushing = false
   private var consecutiveFailures = 0
   private var backoffUntilMs: Int64 = 0
@@ -186,6 +194,30 @@ public actor AdvenueEngine {
     appInstanceId = id
   }
 
+  /// Marks the start of a launch that still owes its install. Called by the
+  /// platform layer BEFORE the launch's foreground, while enrichment (ATT,
+  /// AdServices, attestation) runs. Adjust and AppsFlyer both hold every later
+  /// package behind the first one; this does the same, for at most `holdMs`.
+  public func beginInstall(holdMs: Int) {
+    guard !forgotten, store.string(forKey: INSTALL_SENT_KEY) != "1" else { return }
+    let now = clock.nowMs()
+    installStartedAtMs = now
+    installHoldUntilMs = now + Int64(holdMs)
+  }
+
+  /// Whether a pending install still holds flushes back.
+  private func heldForInstall() -> Bool {
+    guard let until = installHoldUntilMs else { return false }
+    if clock.nowMs() < until { return true }
+    installHoldUntilMs = nil
+    return false
+  }
+
+  private func releaseInstallHold() {
+    installStartedAtMs = nil
+    installHoldUntilMs = nil
+  }
+
   /// The first-open event, at most once per installation. Returns whether it
   /// was recorded.
   ///
@@ -202,13 +234,21 @@ public actor AdvenueEngine {
     if forgotten { return false }
     if config.requireConsent && !consent {
       installDeferred = (adservicesToken, properties, attestation, attestationChallenge)
+      // Deferred possibly for good: the events consent does allow must not
+      // wait on it. Released on consent, the install is stamped then.
+      releaseInstallHold()
       return false
     }
-    if store.string(forKey: INSTALL_SENT_KEY) == "1" { return false }
+    if store.string(forKey: INSTALL_SENT_KEY) == "1" {
+      releaseInstallHold()
+      return false
+    }
+    let installedAtMs = installStartedAtMs ?? clock.nowMs()
+    releaseInstallHold()
 
     var event = ClientEvent(
       id: uuid.next(), deviceId: config.deviceId, type: "install", name: "install",
-      timestamp: EventEncoding.iso8601(ms: clock.nowMs()), platform: config.platform)
+      timestamp: EventEncoding.iso8601(ms: installedAtMs), platform: config.platform)
     event.installationId = config.installationId
     event.appVersion = config.appVersion
     event.osVersion = config.osVersion
@@ -241,7 +281,9 @@ public actor AdvenueEngine {
       merged = properties
     }
     event.properties = config.piiScrubEnabled ? PIIScrub.scrub(merged) : merged
-    queue.enqueue(event)
+    // At the head: the session and custom events recorded while enrichment ran
+    // are already queued, and the install must reach the server before them.
+    queue.enqueueFirst(event)
 
     store.set("1", forKey: INSTALL_SENT_KEY)
     return true
@@ -377,6 +419,7 @@ public actor AdvenueEngine {
   /// behind, which is an erasure that does not erase (spec §5).
   public func forgetMe() {
     forgotten = true
+    releaseInstallHold()
     queue.clear()
     sessions.reset()
     consent = false
@@ -422,7 +465,9 @@ public actor AdvenueEngine {
   /// leaves the batch buffered for the next attempt.
   public func flush() async {
     guard let transport else { return }
-    if flushing || queue.size == 0 || clock.nowMs() < backoffUntilMs { return }
+    if flushing || queue.size == 0 || clock.nowMs() < backoffUntilMs || heldForInstall() {
+      return
+    }
     flushing = true
     defer { flushing = false }
 
@@ -506,6 +551,7 @@ public enum Command: Sendable {
     reporter: any SkanReporter, configVersion: Int)
   case trackInstall(
     adservicesToken: String?, attestation: AttestationResult?, attestationChallenge: String?)
+  case beginInstall(holdMs: Int)
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -567,6 +613,8 @@ public final class CommandPipe: @unchecked Sendable {
         limitAdTracking: limitAdTracking)
     case .setAppInstanceId(let id):
       await engine.setAppInstanceId(id)
+    case .beginInstall(let holdMs):
+      await engine.beginInstall(holdMs: holdMs)
     case .trackInstall(let token, let attestation, let challenge):
       await engine.trackInstall(
         adservicesToken: token, attestation: attestation, attestationChallenge: challenge)

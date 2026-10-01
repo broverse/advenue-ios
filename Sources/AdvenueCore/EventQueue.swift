@@ -49,6 +49,18 @@ public final class EventQueue {
     schedulePersist()
   }
 
+  /// Puts an event at the HEAD of the queue — the install, which is the first
+  /// package of an installation and must not be preceded by the session and
+  /// custom events recorded while enrichment ran. Over the cap, the oldest
+  /// events behind it are dropped, never the event just placed.
+  public func enqueueFirst(_ event: ClientEvent) {
+    events.insert(event, at: 0)
+    if events.count > maxSize {
+      events.removeSubrange(1..<(1 + events.count - maxSize))
+    }
+    schedulePersist()
+  }
+
   public func peek(_ max: Int) -> [ClientEvent] {
     Array(events.prefix(max))
   }

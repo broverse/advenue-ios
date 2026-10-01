@@ -183,6 +183,35 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(install?.appInstanceId, "aaaaaaaabbbbbbbbccccccccdddddddd")
   }
 
+  /// F-SDK-3, through the facade: enrichment that takes a while must not let
+  /// the launch's own events reach the server ahead of the install. The app
+  /// tracks and flushes right after initialize, exactly as the examples do.
+  func testTheFirstBatchLeadsWithTheInstallWhileEnrichmentIsSlow() async throws {
+    let transport = RecordingTransport()
+    let state = newState()
+    let sources = EnrichmentSources(
+      searchAdsToken: {
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        return nil
+      },
+      advertisingId: { (idfa: nil, vendorId: nil) },
+      appInstanceId: { nil })
+
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, sources: sources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "purchase", properties: nil, type: "custom"))
+    state.submit(.flush)
+
+    try await Self.until(timeout: 8, state: state) {
+      await transport.seen.flatMap { $0 }.contains("install")
+    }
+    let seen = await transport.seen
+    XCTAssertEqual(seen.first?.first, "install", "a batch went out ahead of the install: \(seen)")
+  }
+
   private func skanConfig() -> AdvenueConfig {
     var config = AdvenueConfig(
       apiKey: "apk_live_x",

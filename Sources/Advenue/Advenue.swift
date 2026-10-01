@@ -342,6 +342,12 @@ final class FacadeState: @unchecked Sendable {
     pendingDeepLinks = []
     lock.unlock()
 
+    // Before anything else is recorded: a launch that still owes its install
+    // stamps it now and holds every flush until the install is enqueued, so
+    // the server never sees this launch's session or events ahead of it. The
+    // hold outlives the enrichment deadline by a margin and then lapses.
+    pipe.submit(.beginInstall(holdMs: INSTALL_WINDOW_MS + INSTALL_HOLD_MARGIN_MS))
+
     // Replayed in arrival order, before the first session, so a deferred deep
     // link is attributed to the launch it belongs to.
     for url in buffered { send(url) }
