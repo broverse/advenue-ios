@@ -81,6 +81,8 @@ final class EnvelopeVectorTests: XCTestCase {
       files,
       [
         "absent-fields-omitted.json",
+        // Batch-level: asserted by AdvenuePlatformTests.TransportTests.
+        "batch-sent-at.json",
         "install-with-identifiers.json",
         "minimal-custom.json",
         "property-nulls-omitted-in-objects.json",

@@ -6,6 +6,10 @@ import Foundation
 struct EventBatch: Encodable {
   let apiKey: String
   let events: [ClientEvent]
+  /// The device clock at THIS send attempt (spec 2026-10-01-data-fidelity D3).
+  /// The server compares it with its receive time to measure the clock offset,
+  /// so it is stamped on every attempt and never persisted with the queue.
+  let sentAt: String
 }
 
 public let DEFAULT_ENDPOINT = "https://ingest.advenue.io"
@@ -50,8 +54,12 @@ public struct HttpTransport: EventTransport, Sendable {
   /// the wire shape — endpoint, headers, body, signature — without a network
   /// round trip, which is the part that has to be right.
   public func buildRequest(_ events: [ClientEvent]) throws -> URLRequest {
+    // One reading for both `sentAt` and the signed timestamp: they describe
+    // the same instant, and two reads could straddle a clock change.
+    let nowMs = clock.nowMs()
     let body = try EventEncoding.canonicalEncoder()
-      .encode(EventBatch(apiKey: apiKey, events: events))
+      .encode(
+        EventBatch(apiKey: apiKey, events: events, sentAt: EventEncoding.iso8601(ms: nowMs)))
     var request = URLRequest(url: URL(string: "\(endpoint)/v1/events")!)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -59,7 +67,7 @@ public struct HttpTransport: EventTransport, Sendable {
     request.timeoutInterval = 15
 
     if let secret = signingSecret {
-      let timestamp = String(clock.nowMs())
+      let timestamp = String(nowMs)
       request.setValue(timestamp, forHTTPHeaderField: "X-Advenue-Timestamp")
       request.setValue(
         signRequest(

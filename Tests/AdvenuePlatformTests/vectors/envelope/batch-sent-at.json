@@ -1,0 +1,22 @@
+{
+  "name": "a batch carries sentAt — the device clock at send, ISO-8601 UTC with milliseconds — after events",
+  "source": "packages/shared/src/events.ts eventBatchSchema sentAt; docs/superpowers/specs/2026-10-01-data-fidelity-design.md D3 (Adjust's sent_at: the device clock when the package is sent, restamped on every attempt and never persisted with the queued batch)",
+  "kind": "envelope",
+  "batch": {
+    "apiKey": "apk_live_x",
+    "nowMs": 1767225600123,
+    "events": [
+      {
+        "id": "e-1",
+        "deviceId": "dev-1",
+        "type": "custom",
+        "name": "purchase",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "platform": "ios"
+      }
+    ]
+  },
+  "expect": {
+    "body": "{\"apiKey\":\"apk_live_x\",\"events\":[{\"deviceId\":\"dev-1\",\"id\":\"e-1\",\"name\":\"purchase\",\"platform\":\"ios\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"type\":\"custom\"}],\"sentAt\":\"2026-01-01T00:00:00.123Z\"}"
+  }
+}

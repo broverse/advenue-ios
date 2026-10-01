@@ -87,4 +87,65 @@ final class TransportTests: XCTestCase {
   func testBatchCapMatchesTheSchema() {
     XCTAssertEqual(MAX_BATCH_SIZE, 100)
   }
+
+  /// S9 D3: the batch carries `sentAt`, pinned by the shared envelope vector.
+  func testBatchSentAtMatchesTheVector() throws {
+    guard let root = Bundle.module.url(forResource: "vectors", withExtension: nil) else {
+      return XCTFail("vectors not bundled — run `pnpm conformance:sync`")
+    }
+    let data = try Data(
+      contentsOf: root.appendingPathComponent("envelope/batch-sent-at.json"))
+    let vector = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    let batch = vector["batch"] as! [String: Any]
+    let expected = (vector["expect"] as! [String: Any])["body"] as! String
+    let events = (batch["events"] as! [[String: Any]]).map { e in
+      ClientEvent(
+        id: e["id"] as! String, deviceId: e["deviceId"] as! String,
+        type: e["type"] as! String, name: e["name"] as! String,
+        timestamp: e["timestamp"] as! String, platform: e["platform"] as! String)
+    }
+    let nowMs = (batch["nowMs"] as! NSNumber).int64Value
+    let transport = HttpTransport(
+      endpoint: "https://ingest.test", apiKey: batch["apiKey"] as! String,
+      clock: FrozenClock(ms: nowMs))
+
+    let request = try transport.buildRequest(events)
+    XCTAssertEqual(String(decoding: request.httpBody!, as: UTF8.self), expected)
+  }
+
+  /// `sentAt` is the clock at EACH attempt, never a value persisted with the
+  /// queued batch — a retry an hour later must report the hour, or the server
+  /// reads queue delay as clock skew.
+  func testEveryAttemptRestampsSentAt() throws {
+    let clock = SteppingClock(ms: 1_767_225_600_000)
+    let transport = HttpTransport(
+      endpoint: "https://ingest.test", apiKey: "apk_live_x",
+      signingSecret: "sk_test_conformance", clock: clock)
+
+    let first = String(decoding: try transport.buildRequest([event()]).httpBody!, as: UTF8.self)
+    clock.advance(by: 3_600_000)
+    let second = try transport.buildRequest([event()])
+    let secondBody = String(decoding: second.httpBody!, as: UTF8.self)
+
+    XCTAssertTrue(first.hasSuffix(#""sentAt":"2026-01-01T00:00:00.000Z"}"#), first)
+    XCTAssertTrue(secondBody.hasSuffix(#""sentAt":"2026-01-01T01:00:00.000Z"}"#), secondBody)
+    // The signed timestamp and sentAt are the same instant.
+    XCTAssertEqual(second.value(forHTTPHeaderField: "X-Advenue-Timestamp"), "1767229200000")
+  }
+}
+
+private final class SteppingClock: Clock, @unchecked Sendable {
+  private let lock = NSLock()
+  private var ms: Int64
+  init(ms: Int64) { self.ms = ms }
+  func nowMs() -> Int64 {
+    lock.lock()
+    defer { lock.unlock() }
+    return ms
+  }
+  func advance(by delta: Int64) {
+    lock.lock()
+    ms += delta
+    lock.unlock()
+  }
 }
