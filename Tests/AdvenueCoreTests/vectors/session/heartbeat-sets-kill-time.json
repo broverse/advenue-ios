@@ -1,0 +1,86 @@
+{
+  "name": "the heartbeat is the kill time: a relaunch inside the window of it is a sub-session, also after an earlier background",
+  "source": "docs/superpowers/plans/2026-10-01-e2e-fixes/R1-sdk.md Task 2 — Adjust's lastActivity model (a launch within the session interval of the last activity is a sub-session). A heartbeat refreshes the open sub-session's last activity; a kill after a sub-session closes THAT sub-session (subSession 2) with the active time up to the heartbeat, and timeSpentMs keeps the earlier sub-session's time.",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 0,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    },
+    {
+      "op": "background",
+      "at": 1000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "activeMs": 1000,
+            "timeSpentMs": 1000,
+            "sessionLengthMs": 1000
+          }
+        }
+      ]
+    },
+    {
+      "op": "foreground",
+      "at": 2000,
+      "expect": []
+    },
+    {
+      "op": "heartbeat",
+      "at": 5000,
+      "expect": []
+    },
+    {
+      "op": "foreground",
+      "at": 9000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 2,
+            "activeMs": 3000,
+            "timeSpentMs": 4000,
+            "sessionLengthMs": 5000,
+            "synthetic": true
+          }
+        }
+      ]
+    },
+    {
+      "op": "background",
+      "at": 10000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 3,
+            "activeMs": 1000,
+            "timeSpentMs": 5000,
+            "sessionLengthMs": 10000
+          }
+        }
+      ]
+    }
+  ]
+}

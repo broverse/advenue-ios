@@ -1,6 +1,6 @@
 {
-  "name": "a session left open by an OS kill is closed synthetically BEFORE the next one starts",
-  "source": "retired: packages/sdk-core/src/session-tracker.ts handleForeground — activeStart != null with no intervening background means the app was killed; the prior session gets a synthetic end so a consumer never sees two sessions open at once. Order matters: end then start.",
+  "name": "a session left open by an OS kill gets a synthetic end, and a relaunch inside the window continues it",
+  "source": "docs/superpowers/plans/2026-10-01-e2e-fixes/R1-sdk.md Task 2 — Adjust's lastActivity model (a launch within the session interval of the last activity is a sub-session). Replaces the retired sdk-core rule that split every killed session: with no heartbeat the last known activity is the sub-session's start, so the orphan is closed there (activeMs 0) and the relaunch, 5 s later, is a sub-session. Order matters: the end is emitted before anything the relaunch emits.",
   "kind": "session",
   "windowMs": 1800000,
   "steps": [
@@ -30,20 +30,27 @@
             "sessionId": "sid-1",
             "sessionNumber": 1,
             "subSession": 1,
-            "activeMs": 5000,
-            "timeSpentMs": 5000,
-            "sessionLengthMs": 5000,
+            "activeMs": 0,
+            "timeSpentMs": 0,
+            "sessionLengthMs": 0,
             "synthetic": true
           }
-        },
+        }
+      ]
+    },
+    {
+      "op": "background",
+      "at": 8000,
+      "expect": [
         {
-          "name": "session_start",
+          "name": "session_end",
           "properties": {
-            "sessionId": "sid-2",
-            "sessionNumber": 2,
-            "subSession": 1,
-            "isFirstSession": false,
-            "timeSinceLastSessionMs": 0
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 2,
+            "activeMs": 3000,
+            "timeSpentMs": 3000,
+            "sessionLengthMs": 8000
           }
         }
       ]

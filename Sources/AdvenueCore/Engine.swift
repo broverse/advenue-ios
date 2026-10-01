@@ -167,6 +167,9 @@ public actor AdvenueEngine {
     }
     event.properties = config.piiScrubEnabled ? PIIScrub.scrub(properties) : properties
     queue.enqueue(event)
+    // An event is proof of life: a relaunch after an OS kill measures the gap
+    // from the last one (F-SDK-7).
+    sessions.heartbeat()
     return true
   }
 
@@ -464,6 +467,9 @@ public actor AdvenueEngine {
   /// throws — a timer-driven call is unawaited, so a transient failure simply
   /// leaves the batch buffered for the next attempt.
   public func flush() async {
+    // The auto-flush timer is the foreground tick: it keeps the open
+    // sub-session's last activity fresh even when the app records nothing.
+    if !forgotten { sessions.heartbeat() }
     guard let transport else { return }
     if flushing || queue.size == 0 || clock.nowMs() < backoffUntilMs || heldForInstall() {
       return

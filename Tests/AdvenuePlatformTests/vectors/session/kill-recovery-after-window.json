@@ -1,0 +1,57 @@
+{
+  "name": "a killed session relaunched after the window from its last heartbeat ends at that heartbeat and a new session starts",
+  "source": "docs/superpowers/plans/2026-10-01-e2e-fixes/R1-sdk.md Task 2 — Adjust's lastActivity model (a launch within the session interval of the last activity is a sub-session). The orphan's end is stamped at the last heartbeat, not at the relaunch (dead time is not active time), and timeSinceLastSessionMs is the real gap from it.",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 0,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    },
+    {
+      "op": "heartbeat",
+      "at": 60000,
+      "expect": []
+    },
+    {
+      "op": "foreground",
+      "at": 1860000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "activeMs": 60000,
+            "timeSpentMs": 60000,
+            "sessionLengthMs": 60000,
+            "synthetic": true
+          }
+        },
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-2",
+            "sessionNumber": 2,
+            "subSession": 1,
+            "isFirstSession": false,
+            "timeSinceLastSessionMs": 1800000
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -18,10 +18,15 @@ final class SessionVectorTests: XCTestCase {
       let steps: [[String: Any]] = try vector.value("steps")
       for (index, step) in steps.enumerated() {
         clock.ms = Int64(step["at"] as! Int)
-        let emitted: [SessionEvent] =
-          (step["op"] as! String) == "foreground"
-          ? tracker.handleForeground()
-          : [tracker.handleBackground()].compactMap { $0 }
+        let emitted: [SessionEvent]
+        switch step["op"] as! String {
+        case "foreground": emitted = tracker.handleForeground()
+        case "background": emitted = [tracker.handleBackground()].compactMap { $0 }
+        case "heartbeat":
+          tracker.heartbeat()
+          emitted = []
+        case let op: XCTFail("\(vector.file): unknown op \(op)"); emitted = []
+        }
 
         let expected = step["expect"] as! [[String: Any]]
         let context = "\(vector.file) step \(index) at \(step["at"] ?? "?")"
