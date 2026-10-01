@@ -78,8 +78,8 @@ public struct HttpTransport: EventTransport, Sendable {
       (payload, response) = try await session.data(for: request)
     } catch {
       // No status to reason about. 408 marks it retryable, which is what
-      // sdk-core does for the same case.
-      throw IngestError(status: 408)
+      // sdk-core does for the same case; the cause says it was the network.
+      throw IngestError(status: 408, networkCause: describeNetworkFailure(error))
     }
     guard let http = response as? HTTPURLResponse else { throw IngestError(status: 408) }
     guard (200..<300).contains(http.statusCode) else {
@@ -93,5 +93,21 @@ public struct HttpTransport: EventTransport, Sendable {
     {
       onAccepted(appId)
     }
+  }
+}
+
+/// A short, identifier-free name for a failure that produced no response.
+func describeNetworkFailure(_ error: any Error) -> String {
+  guard let urlError = error as? URLError else { return String(describing: type(of: error)) }
+  switch urlError.code {
+  case .notConnectedToInternet: return "not connected to the internet"
+  case .timedOut: return "timed out"
+  case .cannotFindHost, .dnsLookupFailed: return "host not found"
+  case .cannotConnectToHost: return "connection refused"
+  case .networkConnectionLost: return "connection lost"
+  case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+    .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot:
+    return "TLS failure"
+  default: return "URLError \(urlError.code.rawValue)"
   }
 }

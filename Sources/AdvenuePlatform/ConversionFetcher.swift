@@ -38,7 +38,7 @@ public struct HttpConversionFetcher: ConversionFetcher {
       (payload, response) = try await session.data(for: request)
     } catch {
       // No status to reason about; 408 marks it retryable, as sdk-core does.
-      throw IngestError(status: 408)
+      throw IngestError(status: 408, networkCause: describeNetworkFailure(error))
     }
     guard let http = response as? HTTPURLResponse else { throw IngestError(status: 408) }
     guard (200..<300).contains(http.statusCode) else {

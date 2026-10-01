@@ -3,9 +3,23 @@ import Foundation
 /// A non-2xx ingest response. `isRetryable` separates a transient failure from
 /// a poison payload: retrying a 400 forever would block the queue head, and
 /// dropping a 429 would discard events over a throttle.
-public struct IngestError: Error, Equatable, Sendable {
+public struct IngestError: Error, Equatable, Sendable, CustomStringConvertible {
   public let status: Int
-  public init(status: Int) { self.status = status }
+  /// Set when no response arrived at all — DNS, refused connection, timeout,
+  /// no network. `status` is then 408 so the backoff retries it, but that 408
+  /// was never sent by a server, and logging it as one sends whoever debugs it
+  /// looking at the wrong end (F-SDK-10).
+  public let networkCause: String?
+
+  public init(status: Int, networkCause: String? = nil) {
+    self.status = status
+    self.networkCause = networkCause
+  }
+
+  public var description: String {
+    if let networkCause { return "IngestError: no response (network error: \(networkCause))" }
+    return "IngestError(status: \(status))"
+  }
 
   public var isRetryable: Bool {
     status == 408 || status == 429 || status >= 500

@@ -52,6 +52,30 @@ final class TransportTests: XCTestCase {
     XCTAssertEqual(expected.count, 64)
   }
 
+  /// F-SDK-10: with no response at all there is no HTTP status to report. The
+  /// failure stays 408 for the backoff (retryable, like sdk-core), but what is
+  /// logged says it was the network, not a 408 the server never sent.
+  func testANetworkFailureIsReportedAsANetworkErrorNotAnHTTP408() async {
+    // Port 1 on loopback: refused at once, no DNS and no real network.
+    let transport = HttpTransport(endpoint: "https://127.0.0.1:1", apiKey: "apk_live_x")
+    do {
+      try await transport.send([event()])
+      XCTFail("the send must fail")
+    } catch let error as IngestError {
+      XCTAssertTrue(error.isRetryable)
+      XCTAssertEqual(error.status, 408)
+      let text = "\(error)"
+      XCTAssertTrue(text.contains("network error"), text)
+      XCTAssertFalse(text.contains("408"), text)
+    } catch {
+      XCTFail("unexpected \(error)")
+    }
+  }
+
+  func testAnHTTPFailureStillNamesItsStatus() {
+    XCTAssertEqual("\(IngestError(status: 503))", "IngestError(status: 503)")
+  }
+
   func testStatusClassificationMatchesTheBackoffVectors() {
     XCTAssertTrue(IngestError(status: 429).isRetryable)
     XCTAssertTrue(IngestError(status: 503).isRetryable)
