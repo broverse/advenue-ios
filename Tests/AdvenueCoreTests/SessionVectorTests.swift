@@ -10,10 +10,12 @@ final class SessionVectorTests: XCTestCase {
 
     for vector in vectors {
       let clock = MutableClock()
-      let tracker = SessionTracker(
-        store: MemoryStore(), clock: clock,
-        windowMs: Int64(try vector.value("windowMs") as Int),
-        uuid: SequentialUUIDs(prefix: "sid"))
+      // One store and one UUID source for the whole vector: `relaunch` is a
+      // new process — a fresh tracker over the state the old one persisted.
+      let store = MemoryStore()
+      let uuids = SequentialUUIDs(prefix: "sid")
+      let windowMs = Int64(try vector.value("windowMs") as Int)
+      var tracker = SessionTracker(store: store, clock: clock, windowMs: windowMs, uuid: uuids)
 
       let steps: [[String: Any]] = try vector.value("steps")
       for (index, step) in steps.enumerated() {
@@ -24,6 +26,9 @@ final class SessionVectorTests: XCTestCase {
         case "background": emitted = [tracker.handleBackground()].compactMap { $0 }
         case "heartbeat":
           tracker.heartbeat()
+          emitted = []
+        case "relaunch":
+          tracker = SessionTracker(store: store, clock: clock, windowMs: windowMs, uuid: uuids)
           emitted = []
         case let op: XCTFail("\(vector.file): unknown op \(op)"); emitted = []
         }

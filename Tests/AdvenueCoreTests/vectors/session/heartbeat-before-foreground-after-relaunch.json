@@ -1,0 +1,85 @@
+{
+  "name": "after a kill, activity recorded by the new process before its foreground transition does not move the kill time",
+  "source": "docs/superpowers/plans/2026-10-02-run3-fixes/G2-ingest-sdk.md Task 4 (X-SDK-1) — Adjust's lastActivity model: only foreground activity extends a session. A relaunched process that tracks or flushes before handleForeground (iOS didFinishLaunching runs before didBecomeActive; push/WorkManager wakes) must not refresh the dead process's sub-session, or the dead time is counted as active time. `relaunch` is a new tracker over the same persisted store — a new process.",
+  "kind": "session",
+  "windowMs": 1800000,
+  "steps": [
+    {
+      "op": "foreground",
+      "at": 0,
+      "expect": [
+        {
+          "name": "session_start",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "isFirstSession": true,
+            "timeSinceLastSessionMs": 0
+          }
+        }
+      ]
+    },
+    {
+      "op": "heartbeat",
+      "at": 10000,
+      "expect": []
+    },
+    {
+      "op": "relaunch",
+      "at": 20000,
+      "expect": []
+    },
+    {
+      "op": "heartbeat",
+      "at": 25000,
+      "expect": []
+    },
+    {
+      "op": "foreground",
+      "at": 26000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 1,
+            "activeMs": 10000,
+            "timeSpentMs": 10000,
+            "sessionLengthMs": 10000,
+            "synthetic": true
+          }
+        }
+      ]
+    },
+    {
+      "op": "heartbeat",
+      "at": 30000,
+      "expect": []
+    },
+    {
+      "op": "relaunch",
+      "at": 40000,
+      "expect": []
+    },
+    {
+      "op": "foreground",
+      "at": 41000,
+      "expect": [
+        {
+          "name": "session_end",
+          "properties": {
+            "sessionId": "sid-1",
+            "sessionNumber": 1,
+            "subSession": 2,
+            "activeMs": 4000,
+            "timeSpentMs": 14000,
+            "sessionLengthMs": 30000,
+            "synthetic": true
+          }
+        }
+      ]
+    }
+  ]
+}

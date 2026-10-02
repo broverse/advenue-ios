@@ -37,6 +37,11 @@ public final class SessionTracker {
   private let clock: Clock
   private let windowMs: Int64
   private let uuid: UUIDSource
+  /// True once THIS process opened the current sub-session (X-SDK-1). Never
+  /// persisted: a relaunched process starts false, so its tracks and flushes
+  /// before `handleForeground()` cannot keep the dead process's sub-session
+  /// alive and move its kill time to the relaunch.
+  private var ownsOpenSubSession = false
 
   public init(store: KeyValueStore, clock: Clock, windowMs: Int64, uuid: UUIDSource) {
     self.store = store
@@ -47,7 +52,10 @@ public final class SessionTracker {
 
   /// Drops the in-memory cache so a wiped store cannot be resurrected by a
   /// later lifecycle call (GDPR erasure).
-  public func reset() { cached = nil }
+  public func reset() {
+    cached = nil
+    ownsOpenSubSession = false
+  }
 
   private func load() -> SessionState? {
     if let cached { return cached }
@@ -69,7 +77,14 @@ public final class SessionTracker {
   /// engine on every recorded event and every flush — the auto-flush timer is
   /// the foreground tick. It is what a relaunch after an OS kill measures the
   /// gap from, the role Adjust's `lastActivity` plays.
+  ///
+  /// A no-op until this process has run `handleForeground()`: only the process
+  /// that opened the sub-session may extend it. Otherwise an event or flush in a
+  /// relaunched process (iOS `didFinishLaunching` runs before
+  /// `didBecomeActive`; push and background wakes) would stamp the killed
+  /// sub-session alive "now" and count the dead time as active (X-SDK-1).
   public func heartbeat() {
+    guard ownsOpenSubSession else { return }
     guard var state = load(), let activeStart = state.activeStart else { return }
     let now = clock.nowMs()
     if now - (state.lastActiveAt ?? activeStart) < SESSION_HEARTBEAT_MIN_INTERVAL_MS { return }
@@ -128,6 +143,7 @@ public final class SessionTracker {
         SessionState(
           sessionId: sessionId, sessionNumber: sessionNumber, lastBackgroundAt: nil,
           subSessionCount: 1, activeStart: now, firstForegroundAt: now, timeSpentMs: 0))
+      ownsOpenSubSession = true
 
       return [
         SessionEvent(
@@ -147,6 +163,7 @@ public final class SessionTracker {
     updated.activeStart = now
     updated.lastActiveAt = nil
     save(updated)
+    ownsOpenSubSession = true
     return []
   }
 
@@ -164,6 +181,7 @@ public final class SessionTracker {
     state.lastActiveAt = nil
     state.timeSpentMs = timeSpentMs
     save(state)
+    ownsOpenSubSession = false
     return SessionEvent(
       name: "session_end",
       properties: [

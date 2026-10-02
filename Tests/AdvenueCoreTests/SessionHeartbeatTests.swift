@@ -40,6 +40,33 @@ final class SessionHeartbeatTests: XCTestCase {
     XCTAssertEqual(end?.properties?["activeMs"], .int(20_000))
   }
 
+  /// X-SDK-1: the relaunch tracks and flushes BEFORE its foreground transition
+  /// (`didFinishLaunching` runs before `didBecomeActive`). That activity belongs
+  /// to the new process, not to the killed sub-session: the dead 40 s must not
+  /// be counted as active time.
+  func testEventsBeforeTheRelaunchForegroundDoNotMoveTheKillTime() async {
+    let store = MemoryStore()
+    let clock = MutableClock()
+    clock.ms = 1_000_000
+
+    let first = engine(store, clock)
+    await first.notifyForeground()
+    clock.ms += 20_000
+    await first.track("example_purchase")
+    // The process dies here: no background, no session_end.
+
+    clock.ms += 40_000
+    let relaunched = engine(store, clock)
+    await relaunched.track("example_purchase")
+    clock.ms += 300
+    await relaunched.flush()
+    await relaunched.notifyForeground()
+
+    let end = await relaunched.pendingEvents().first { $0.name == "session_end" }
+    XCTAssertEqual(end?.properties?["synthetic"], .bool(true))
+    XCTAssertEqual(end?.properties?["activeMs"], .int(20_000))
+  }
+
   func testAFlushTickIsTheKillTimeToo() async {
     let store = MemoryStore()
     let clock = MutableClock()
