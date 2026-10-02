@@ -24,13 +24,24 @@ public struct HttpConversionFetcher: ConversionFetcher {
     self.session = session
   }
 
-  public func fetch() async throws -> ConversionResult {
+  /// Sends `?platform=ios`: this fetcher is iOS-only by construction, and a
+  /// project key spans listings, so the server needs the platform to pick the
+  /// one this install was filed under (Y-LINKS-1). Without it the lookup
+  /// refused the project key the dashboard mints, and the deferred deep link
+  /// never arrived.
+  func buildRequest() -> URLRequest {
     let escaped =
       deviceId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? deviceId
-    var request = URLRequest(url: URL(string: "\(endpoint)/sdk/conversion-data?deviceId=\(escaped)")!)
+    var request = URLRequest(
+      url: URL(string: "\(endpoint)/sdk/conversion-data?deviceId=\(escaped)&platform=ios")!)
     request.httpMethod = "GET"
     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
     request.timeoutInterval = 15
+    return request
+  }
+
+  public func fetch() async throws -> ConversionResult {
+    let request = buildRequest()
 
     let payload: Data
     let response: URLResponse

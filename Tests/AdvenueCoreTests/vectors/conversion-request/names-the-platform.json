@@ -1,0 +1,18 @@
+{
+  "name": "the deferred-deep-link lookup names the SDK's platform, so a project key resolves its listing",
+  "source": "apps/api/src/sdk-conversion.ts handleConversionLookup — a project key picks the listing from ?platform= with resolveAppForScope (Y-LINKS-1, docs/superpowers/e2e-2026-10-02-run4/links.md); without it a project key on a multi-listing product cannot be served",
+  "kind": "conversion-request",
+  "input": {
+    "endpoint": "https://api.conformance.test",
+    "apiKey": "apk_live_project",
+    "deviceId": "8F2C6A1E-3B4D-4E5F-9A0B-1C2D3E4F5A6B"
+  },
+  "expected": {
+    "method": "GET",
+    "headers": { "x-api-key": "apk_live_project" },
+    "url": {
+      "ios": "https://api.conformance.test/sdk/conversion-data?deviceId=8F2C6A1E-3B4D-4E5F-9A0B-1C2D3E4F5A6B&platform=ios",
+      "android": "https://api.conformance.test/sdk/conversion-data?deviceId=8F2C6A1E-3B4D-4E5F-9A0B-1C2D3E4F5A6B&platform=android"
+    }
+  }
+}
