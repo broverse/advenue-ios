@@ -13,7 +13,13 @@ Native iOS SDK. Spec: `docs/superpowers/specs/2026-08-31-native-ios-sdk-design.m
   on a Linux CI runner instead of a macOS one, so a stray platform import is a
   build failure rather than a quiet cost increase.
 
-- `AdvenuePlatform`, `Advenue`, `AdvenueFirebase` — plan 2b.
+- **`AdvenuePlatform`** — everything `AdvenueCore` cannot touch: URLSession
+  transport, CryptoKit signing, UIKit lifecycle, Keychain, SKAdNetwork, App
+  Attest, AdServices, ATT/IDFA.
+- **`Advenue`** — the public facade: `Advenue.initialize`, `track`, consent,
+  deep links, uninstall tokens, SKAN revenue. Delegates to the engine.
+- **`AdvenueFirebase`** — Firebase Analytics App Instance ID, for apps that
+  ship Firebase. Optional; the base SDK never requires it.
 
 ## Concurrency
 
@@ -30,7 +36,7 @@ stops. `ConcurrencyTests` pins both properties.
 ## Conformance
 
 `AdvenueCore` is verified against `packages/conformance/vectors/`, the same
-files the TypeScript SDK runs. The Swift package reads a mirror under
+files the Kotlin SDK runs. The Swift package reads a mirror under
 `Tests/AdvenueCoreTests/vectors/`, written by `pnpm conformance:sync`; CI
 asserts the mirror never drifts.
 
