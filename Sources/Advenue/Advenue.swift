@@ -279,7 +279,7 @@ final class FacadeState: @unchecked Sendable {
         osVersion: osVersion,
         sdkVersion: String((config.sdkVersion ?? AdvenueVersion.current).prefix(32)),
         requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,
-        batchSize: config.batchSize),
+        batchSize: config.batchSize, piiScrubEnabled: config.piiScrubEnabled),
       store: store, clock: SystemClock(), scheduler: TimerScheduler(), uuid: uuid,
       transport: eventTransport,
       onError: config.onError)

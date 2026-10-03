@@ -10,7 +10,7 @@ public struct AdvenueConfig: Sendable {
   public var appVersion: String?
   public var requireConsent: Bool
   public var sessionWindowMs: Int64
-  /// Events per request. Matches sdk-core.
+  /// Events per request. Matches the other SDKs.
   public var batchSize: Int
   /// Auto-flush period. Zero disables the timer, which is what tests want and
   /// no shipping app does.
@@ -36,6 +36,10 @@ public struct AdvenueConfig: Sendable {
   /// Xcode's console and Console.app. Never logs an identifier or a payload.
   /// Leave off in production; route failures through `onError` instead.
   public var debug: Bool
+
+  /// B1: track/install properties PII scrub. On by default; disable only
+  /// explicitly (documented risk — raw PII reaches ingest). Same as Android.
+  public var piiScrubEnabled: Bool
 
   /// Overrides the version stamped on every event. Set by a WRAPPER SDK, never
   /// by an app.
@@ -70,7 +74,8 @@ public struct AdvenueConfig: Sendable {
     onError: @escaping @Sendable (String, any Error) -> Void = { _, _ in },
     sdkVersion: String? = nil,
     allowInsecureHttp: Bool = false,
-    debug: Bool = false
+    debug: Bool = false,
+    piiScrubEnabled: Bool = true
   ) {
     precondition(
       allowInsecureHttp || Self.isSecureEndpoint(endpoint),
@@ -87,6 +92,7 @@ public struct AdvenueConfig: Sendable {
     self.conversionValues = conversionValues
     self.onError = onError
     self.sdkVersion = sdkVersion
+    self.piiScrubEnabled = piiScrubEnabled
   }
 }
 

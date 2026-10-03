@@ -614,6 +614,42 @@ final class SeamTests: XCTestCase {
     }
     XCTFail("condition never became true within \(timeout)s")
   }
+
+  /// M2 travels the whole seam: the public config's switch must reach the
+  /// engine that scrubs. The field was missing from AdvenueConfig entirely —
+  /// iOS scrubbed always, with no opt-out — while Android exposed it.
+  func testPiiScrubDefaultsOnThroughTheFacade() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    state.start(
+      AdvenueConfig(apiKey: "apk_live_x"), transport: transport, sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "scrubbed", properties: ["email": .string("a@b.com")], type: "custom"))
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "scrubbed" }
+    }
+    let event = await transport.events.first { $0.name == "scrubbed" }
+    XCTAssertNil(event?.properties?["email"], "the default config must scrub PII before send")
+  }
+
+  func testPiiScrubOptOutTravelsThroughTheFacade() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.piiScrubEnabled = false
+    state.start(config, transport: transport, sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "unscrubbed", properties: ["email": .string("a@b.com")], type: "custom"))
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "unscrubbed" }
+    }
+    let event = await transport.events.first { $0.name == "unscrubbed" }
+    XCTAssertEqual(
+      event?.properties?["email"], .string("a@b.com"),
+      "an explicit opt-out must leave properties untouched")
+  }
 }
 
 /// Collects debug log lines.
