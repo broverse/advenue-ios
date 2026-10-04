@@ -3,6 +3,14 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
+## 1.1.1
+
+- **Swift 6 main-actor reads.** `UIScreen.main`, `UIDevice.current` and
+  `UIApplication.applicationState` are main-actor isolated under Swift 6. The
+  device and advertising-identity collectors run on background tasks, so they
+  now hop to the main queue for those reads instead of touching UIKit off the
+  main thread. No public API changes.
+
 ## 1.1.0
 
 - **Batch `sentAt`.** Every upload attempt stamps the batch with the time it
