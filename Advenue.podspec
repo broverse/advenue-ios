@@ -8,7 +8,7 @@ Pod::Spec.new do |s|
   s.summary          = 'Advenue attribution SDK for iOS'
   s.description      = 'Open-source mobile measurement: attribution, sessions, in-app events.'
   s.homepage         = 'https://github.com/broverse/advenue'
-  s.license          = { :type => 'AGPL-3.0', :file => 'LICENSE' }
+  s.license          = { :type => 'MIT', :file => 'packages/sdk-swift/LICENSE' }
   s.author           = { 'Advenue' => 'support@advenue.io' }
   s.source           = { :git => 'https://github.com/broverse/advenue.git', :tag => "sdk-swift-v#{s.version}" }
   # The SDK is four SwiftPM modules that import each other; CocoaPods builds
