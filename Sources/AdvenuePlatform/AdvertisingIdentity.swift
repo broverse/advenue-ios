@@ -59,7 +59,7 @@ public struct AdvertisingIdentity: Sendable {
   /// would be "tracking" under Apple's policy.
   public var vendorId: String? {
     #if canImport(UIKit)
-      return UIDevice.current.identifierForVendor?.uuidString
+      return onMainSync { UIDevice.current.identifierForVendor?.uuidString }
     #else
       return nil
     #endif

@@ -30,7 +30,9 @@ public func readLaunchedInBackground() -> Bool {
     guard UIApplication.responds(to: selector),
       let app = UIApplication.perform(selector)?.takeUnretainedValue() as? UIApplication
     else { return false }
-    return app.applicationState == .background
+    // On the main thread by the guard above, so this is a static fact for
+    // the compiler rather than a runtime hop.
+    return MainActor.assumeIsolated { app.applicationState == .background }
   #else
     return false
   #endif
@@ -61,10 +63,11 @@ public func collectDeviceInfo() -> [String: AdvenueValue] {
   }
 
   #if canImport(UIKit)
-    let screen = UIScreen.main.bounds
-    info["screenWidth"] = .int(Int(screen.width))
-    info["screenHeight"] = .int(Int(screen.height))
-    info["screenDensity"] = .double(Double(UIScreen.main.scale))
+    // One hop for both reads: this runs on a background task in production.
+    let (bounds, scale) = onMainSync { (UIScreen.main.bounds, UIScreen.main.scale) }
+    info["screenWidth"] = .int(Int(bounds.width))
+    info["screenHeight"] = .int(Int(bounds.height))
+    info["screenDensity"] = .double(Double(scale))
   #endif
 
   if let attributes = try? FileManager.default.attributesOfFileSystem(

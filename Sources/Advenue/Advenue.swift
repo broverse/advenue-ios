@@ -253,7 +253,7 @@ final class FacadeState: @unchecked Sendable {
 
     let osVersion: String?
     #if canImport(UIKit)
-      osVersion = UIDevice.current.systemVersion
+      osVersion = onMainSync { UIDevice.current.systemVersion }
     #else
       osVersion = nil
     #endif

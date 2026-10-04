@@ -36,6 +36,21 @@ final class DeviceInfoTests: XCTestCase {
     XCTAssertNotEqual(model, "unknown")
   }
 
+  /// Production calls this from a background `Task` (`Advenue.start`
+  /// submits it there), so the main-actor hop for the screen fields must work
+  /// off the main thread: no deadlock, no trap, same fields.
+  func testCollectsFromABackgroundThread() async {
+    let info = await Task.detached { collectDeviceInfo() }.value
+
+    XCTAssertNotNil(info["model"])
+    #if canImport(UIKit)
+      guard case .int(let width)? = info["screenWidth"] else {
+        return XCTFail("no screenWidth collected off the main thread")
+      }
+      XCTAssertGreaterThan(width, 0)
+    #endif
+  }
+
   func testItEncodesAsEventProperties() throws {
     var event = ClientEvent(
       id: "i", deviceId: "d", type: "install", name: "install",
