@@ -221,6 +221,16 @@ public actor AdvenueEngine {
     installHoldUntilMs = now + Int64(holdMs)
   }
 
+  /// Re-arms the hold for an install this launch still owes, from now. For
+  /// the end of the ATT wait: the wait is bounded by the wall clock too, so an
+  /// app suspended through it resumes with the original hold lapsed — and
+  /// enrichment still to run. Without this the launch's events flush ahead of
+  /// the install for those few seconds. A no-op once the install is enqueued.
+  public func extendInstallHold(holdMs: Int) {
+    guard !forgotten, installStartedAtMs != nil else { return }
+    installHoldUntilMs = clock.nowMs() + Int64(holdMs)
+  }
+
   /// Whether a pending install still holds flushes back.
   private func heldForInstall() -> Bool {
     guard let until = installHoldUntilMs else { return false }
@@ -572,6 +582,7 @@ public enum Command: Sendable {
   case trackInstall(
     adservicesToken: String?, attestation: AttestationResult?, attestationChallenge: String?)
   case beginInstall(holdMs: Int)
+  case extendInstallHold(holdMs: Int)
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -636,6 +647,8 @@ public final class CommandPipe: @unchecked Sendable {
         idfa: idfa, vendorId: vendorId, limitAdTracking: limitAdTracking)
     case .setAppInstanceId(let id):
       await engine.setAppInstanceId(id)
+    case .extendInstallHold(let holdMs):
+      await engine.extendInstallHold(holdMs: holdMs)
     case .beginInstall(let holdMs):
       await engine.beginInstall(holdMs: holdMs)
     case .trackInstall(let token, let attestation, let challenge):

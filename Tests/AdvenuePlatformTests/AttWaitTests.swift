@@ -56,6 +56,23 @@ final class AttWaitTests: XCTestCase {
     XCTAssertLessThan(elapsed.value, 1_500 + 500 + 1, "must not overshoot by more than one poll")
   }
 
+  /// A suspended app sleeps no steps, but the wall clock runs on: the wait
+  /// must end on the wall clock, or it outlives the engine's install hold.
+  func testTimeoutHonoursTheWallClockAcrossASuspension() async {
+    let clock = Locked<Int64>(0)
+    let sleeps = Locked(0)
+    let end = await waitForAttDetermination(
+      status: reader(.notDetermined), pollMs: 500, timeoutMs: 120_000,
+      sleep: { _ in
+        sleeps.mutate { $0 += 1 }
+        // One poll that spans a ten-minute suspension.
+        clock.mutate { $0 += 600_000 }
+      },
+      nowMs: { clock.value })
+    XCTAssertEqual(end, .notDetermined)
+    XCTAssertEqual(sleeps.value, 1, "the wall clock, not the step count, ends this wait")
+  }
+
   func testCancellationExitsEarly() async {
     // Hoisted: calling self.reader inside the Task would capture XCTestCase
     // across the concurrency domain; the @Sendable value itself is fine.

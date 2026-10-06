@@ -94,6 +94,19 @@ public struct AdvertisingIdentity: Sendable {
       idfa: advertisingId, vendorId: vendorId, limitAdTracking: limitAdTracking)
   }
 
+  /// The same snapshot without ever blocking on the main thread: `vendorId`
+  /// is main-actor (UIDevice) and is read only when already on main, nil
+  /// otherwise. For the per-flush refresh, which runs on the flush timer's
+  /// queue and on React Native's JS thread — a `main.sync` there every flush
+  /// deadlocks the moment main is itself waiting on that thread. The IDFA and
+  /// the ATT status need no main thread. The vendor id does not change within
+  /// a process, so the caller keeps the last one it saw.
+  public func nonBlockingSnapshot() -> AdvertisingSnapshot {
+    AdvertisingSnapshot(
+      idfa: advertisingId, vendorId: Thread.isMainThread ? vendorId : nil,
+      limitAdTracking: limitAdTracking)
+  }
+
   /// Presents the system prompt. The app decides when.
   public func requestAuthorization() async -> TrackingAuthorization {
     #if canImport(AppTrackingTransparency)

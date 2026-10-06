@@ -27,6 +27,7 @@ final class InstallWaitTests: XCTestCase {
     case .setConsentData: return "setConsentData"
     case .trackInstall: return "trackInstall"
     case .flush: return "flush"
+    case .extendInstallHold: return "extendHold"
     default: return "other"
     }
   }
@@ -77,11 +78,13 @@ final class InstallWaitTests: XCTestCase {
       statusValues: [.notDetermined, .notDetermined, .authorized],
       attWaitMs: 60_000, installOwed: true, idfa: "IDFA-POST-WAIT")
 
+    // The hold is re-armed first: a wait the app spent suspended can outlast
+    // it, and enrichment is still ahead.
     XCTAssertEqual(
       result.commands.map(kind),
-      ["setIdentity", "setDeviceInfo", "trackInstall", "flush"])
-    guard case .setIdentity(let idfa, _, _, _) = result.commands.first else {
-      return XCTFail("the first submit must be the resolved identity")
+      ["extendHold", "setIdentity", "setDeviceInfo", "trackInstall", "flush"])
+    guard case .setIdentity(let idfa, _, _, _) = result.commands.dropFirst().first else {
+      return XCTFail("the identity must follow the re-armed hold")
     }
     XCTAssertEqual(idfa, "IDFA-POST-WAIT")
     // Gate read + two poll reads; one sleep between the undetermined polls.
@@ -115,9 +118,9 @@ final class InstallWaitTests: XCTestCase {
     XCTAssertTrue(result.events.contains("sleep"), "the timeout must actually be waited out")
     XCTAssertEqual(
       result.commands.map(kind),
-      ["setIdentity", "setDeviceInfo", "trackInstall", "flush"],
+      ["extendHold", "setIdentity", "setDeviceInfo", "trackInstall", "flush"],
       "a timeout costs enrichment, never the install")
-    guard case .setIdentity(let idfa, _, _, _) = result.commands.first else {
+    guard case .setIdentity(let idfa, _, _, _) = result.commands.dropFirst().first else {
       return XCTFail("the first submit must be the identity")
     }
     XCTAssertNil(idfa)

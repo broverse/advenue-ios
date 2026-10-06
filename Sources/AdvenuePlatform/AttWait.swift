@@ -20,19 +20,29 @@ public let ATT_WAIT_POLL_MS = 500
 /// someone else's wait, but it reports what it saw. Never prompts — showing
 /// the dialog is the app's decision, and this also runs on paths (a
 /// background launch) where prompting is impossible.
+///
+/// The timeout is checked against the wall clock as well as the slept steps:
+/// a suspended app sleeps no steps, so counting steps alone stretches the
+/// wait past `timeoutMs` while the engine's install hold — wall clock — has
+/// already lapsed. Steps stay as the other bound so an injected sleep that
+/// takes no time still ends the wait.
 public func waitForAttDetermination(
   status: @Sendable () -> TrackingAuthorization,
   pollMs: Int,
   timeoutMs: Int,
-  sleep: @Sendable (Int) async -> Void
+  sleep: @Sendable (Int) async -> Void,
+  nowMs: @Sendable () -> Int64 = { SystemClock().nowMs() }
 ) async -> TrackingAuthorization {
   let step = max(pollMs, 1)
+  let startedAt = nowMs()
   var waited = 0
   while true {
     if Task.isCancelled { return status() }
     let current = status()
     if current != .notDetermined { return current }
-    if waited >= timeoutMs { return .notDetermined }
+    if waited >= timeoutMs || nowMs() - startedAt >= Int64(timeoutMs) {
+      return .notDetermined
+    }
     await sleep(step)
     waited += step
   }

@@ -66,6 +66,48 @@ final class InstallHoldTests: XCTestCase {
     XCTAssertLessThanOrEqual(install!.timestamp, start!.timestamp)
   }
 
+  /// The ATT wait ran across a suspension: the launch hold lapsed on the wall
+  /// clock while enrichment was still ahead. Re-arming it keeps the events
+  /// behind the install for that last stretch.
+  func testExtendingALapsedHoldHoldsFlushesAgain() async {
+    let store = MemoryStore()
+    let clock = MutableClock()
+    clock.ms = 1_000_000
+    let transport = ScriptedTransport([])
+    let e = engine(store, clock, transport: transport)
+
+    await e.beginInstall(holdMs: 5_000)
+    await e.notifyForeground()
+    clock.ms += 600_000  // suspended through the wait; the hold lapsed
+    await e.extendInstallHold(holdMs: 5_000)
+    await e.track("example_purchase")
+    await e.flush()
+    let sentBeforeInstall = await transport.requests
+    XCTAssertEqual(sentBeforeInstall, [], "the re-armed hold must keep events behind the install")
+
+    await e.trackInstall(adservicesToken: nil)
+    await e.flush()
+    let requests = await transport.requests
+    XCTAssertEqual(requests.first?.first, "ev-4", "the install leads the batch")
+  }
+
+  func testExtendingAfterTheInstallIsANoOp() async {
+    let store = MemoryStore()
+    let clock = MutableClock()
+    clock.ms = 1_000_000
+    let transport = ScriptedTransport([])
+    let e = engine(store, clock, transport: transport)
+
+    await e.beginInstall(holdMs: 5_000)
+    await e.trackInstall(adservicesToken: nil)
+    await e.extendInstallHold(holdMs: 5_000)
+    await e.track("after")
+    await e.flush()
+
+    let requests = await transport.requests
+    XCTAssertEqual(requests.count, 1, "a recorded install leaves nothing to hold for")
+  }
+
   /// A lost enrichment task must never strand the queue.
   func testTheHoldLapsesAtItsCeiling() async {
     let store = MemoryStore()

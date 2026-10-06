@@ -43,8 +43,10 @@ public struct AdvenueConfig: Sendable {
 
   /// Seconds to wait for the ATT answer before the install is enriched and
   /// sent. Zero (the default) means today's behaviour: no wait. Set it when
-  /// the app prompts after onboarding — the IDFA read at initialize would
-  /// otherwise be missing and the install would match probabilistically.
+  /// the app prompts soon after launch, within the interval — the IDFA read
+  /// at initialize would otherwise be missing and the install would match
+  /// probabilistically. A prompt behind a longer onboarding outlasts even the
+  /// 120 s cap: the install ships IDFA-less anyway, only later.
   ///
   /// Only enable this if the app actually prompts: without a prompt every
   /// install waits out the full interval. Clamped to `ATT_CONSENT_WAIT_MAX_SEC`

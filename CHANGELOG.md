@@ -3,6 +3,21 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
+## Unreleased
+
+- **No `main.sync` on every flush.** The identity refresh read the vendor id
+  through `DispatchQueue.main.sync` from the flush timer's queue (and React
+  Native's JS thread), which deadlocks whenever main is itself waiting on that
+  thread. It now reads the vendor id only when already on main and otherwise
+  keeps the last one seen; the IDFA and ATT status are still read every time.
+- **The ATT wait ends on the wall clock.** It counted slept polls, so an app
+  suspended mid-wait stretched it well past the interval while the install
+  hold — wall clock — had lapsed, letting the launch's events go out ahead of
+  the install. The wait is now bounded by both, and re-arms the hold for
+  enrichment once it ends.
+- Docs: the wait helps a prompt shown soon after launch, not one behind a
+  long onboarding — the 120 s cap runs out first.
+
 ## 1.2.0
 
 - **ATT wait (`attConsentWaitingInterval`).** Opt-in seconds to wait for the

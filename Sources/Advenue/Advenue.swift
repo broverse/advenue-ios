@@ -145,7 +145,7 @@ public enum Advenue {
   @discardableResult
   public static func requestTrackingAuthorization() async -> TrackingAuthorization {
     let status = await AdvertisingIdentity().requestAuthorization()
-    let snapshot = AdvertisingIdentity().snapshot()
+    let snapshot = AdvertisingIdentity().nonBlockingSnapshot()
     state.submit(
       .setAdvertisingIdentity(
         idfa: snapshot.idfa, vendorId: snapshot.vendorId,
@@ -209,8 +209,13 @@ final class FacadeState: @unchecked Sendable {
   /// Production reads the system; tests script "the user answered between
   /// init and flush". Under the lock like everything else here.
   private var advertisingSource: @Sendable () -> AdvertisingSnapshot = {
-    AdvertisingIdentity().snapshot()
+    AdvertisingIdentity().nonBlockingSnapshot()
   }
+  /// The last vendor id seen — from install enrichment or an on-main read.
+  /// The refresh cannot read it off the main thread without blocking, and it
+  /// does not change within a process, so a nil read reuses this rather than
+  /// clearing the id on every event that follows.
+  private var knownVendorId: String?
   /// Observers on the app's own lifecycle notifications, and the machine that
   /// decides what they mean. Held so `stop()` can remove them: a stale observer
   /// submitting into a finished pipe outlives the instance that made it.
@@ -476,18 +481,36 @@ final class FacadeState: @unchecked Sendable {
       // the app may prompt through Apple's API directly, or the user may
       // flip tracking in Settings later. Refreshing here — one choke point
       // covering the timer, manual flushes, backgrounding and session open —
-      // gives the same freshness. Cheap synchronous getters; on platforms
-      // without ATT they return the same nils init produced. `track` stays
-      // untouched: it is the hot path and history is not rewritten.
+      // gives the same freshness. Cheap synchronous getters that never block
+      // on the main thread; on platforms without ATT they return the same
+      // nils init produced. `track` stays untouched: it is the hot path and
+      // history is not rewritten.
       let current = source()
       pipe.submit(
         .setAdvertisingIdentity(
-          idfa: current.idfa, vendorId: current.vendorId,
+          idfa: current.idfa, vendorId: resolveVendorId(current.vendorId),
           limitAdTracking: current.limitAdTracking))
       pipe.submit(command)
+    case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking):
+      pipe.submit(
+        .setIdentity(
+          idfa: idfa, vendorId: resolveVendorId(vendorId), appInstanceId: appInstanceId,
+          limitAdTracking: limitAdTracking))
+    case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking):
+      pipe.submit(
+        .setAdvertisingIdentity(
+          idfa: idfa, vendorId: resolveVendorId(vendorId), limitAdTracking: limitAdTracking))
     default:
       pipe.submit(command)
     }
+  }
+
+  /// Remembers a vendor id that was read, and fills one that could not be.
+  private func resolveVendorId(_ read: String?) -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    if let read { knownVendorId = read }
+    return read ?? knownVendorId
   }
 
   /// Erasure spans BOTH stores. The engine clears what lives in UserDefaults;

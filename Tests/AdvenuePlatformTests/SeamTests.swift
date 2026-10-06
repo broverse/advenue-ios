@@ -236,6 +236,37 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(probe?.vendorId, "VID-refresh")
   }
 
+  /// The refresh reads the vendor id only on the main thread — off it (the
+  /// flush timer, React Native's JS thread) it reports nil rather than block
+  /// on `main.sync`. That nil must not clear the id install enrichment read.
+  func testOffMainRefreshKeepsTheEnrichedVendorId() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: transport,
+      sources: EnrichmentSources(
+        searchAdsToken: { nil },
+        advertisingId: { (idfa: nil, vendorId: "VID-enriched") },
+        appInstanceId: { nil }),
+      advertisingSource: {
+        AdvertisingSnapshot(idfa: "IDFA-refresh", vendorId: nil, limitAdTracking: false)
+      })
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
+
+    state.submit(.track(name: "probe", properties: nil, type: "custom"))
+    state.submit(.flush)
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "probe" }
+    }
+    let probe = await transport.events.first { $0.name == "probe" }
+    XCTAssertEqual(probe?.idfa, "IDFA-refresh")
+    XCTAssertEqual(probe?.vendorId, "VID-enriched", "an unread vendor id must not clear the known one")
+  }
+
   /// F-SDK-3, through the facade: enrichment that takes a while must not let
   /// the launch's own events reach the server ahead of the install. The app
   /// tracks and flushes right after initialize, exactly as the examples do.

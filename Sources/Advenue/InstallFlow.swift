@@ -30,13 +30,18 @@ func runInstallFlow(
   sleep: @escaping @Sendable (Int) async -> Void,
   log: @escaping @Sendable (String) -> Void
 ) async {
+  var waited = false
   if installOwed, attWaitMs > 0, attStatus() == .notDetermined {
     log("[Advenue] waiting up to \(attWaitMs / 1000)s for the ATT answer before the install")
     let resolved = await waitForAttDetermination(
       status: attStatus, pollMs: ATT_WAIT_POLL_MS, timeoutMs: attWaitMs, sleep: sleep)
     log("[Advenue] ATT wait ended: \(resolved.rawValue)")
+    waited = true
   }
   guard !Task.isCancelled else { return }
+  // The hold was sized from launch; after a wait the app may have spent
+  // suspended, it can already have lapsed. Enrichment still has to run.
+  if waited { submit(.extendInstallHold(holdMs: deadlineMs + INSTALL_HOLD_MARGIN_MS)) }
   let enrichment = await collectEnrichment(sources, deadlineMs: deadlineMs)
   guard !Task.isCancelled else { return }
   submit(
