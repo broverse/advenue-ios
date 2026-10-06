@@ -74,10 +74,11 @@ generated from an implementation.
 
 ## ATT wait
 
-If your app prompts for ATT after onboarding, the IDFA read at initialize is
+If your app prompts for ATT after `initialize`, the IDFA read at initialize is
 missing and the install matches probabilistically. `attConsentWaitingInterval`
 (seconds, default 0 = off) holds the install until the ATT answer arrives or
-the timeout lapses — Adjust parity, capped at 120 s:
+the timeout lapses — Adjust parity, capped at 120 s. It helps only when the
+prompt comes within that window; one behind a longer onboarding outlasts it:
 
 ```swift
 Advenue.initialize(AdvenueConfig(
