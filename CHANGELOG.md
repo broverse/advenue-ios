@@ -3,7 +3,7 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
-## Unreleased
+## 1.2.1
 
 - **No `main.sync` on every flush.** The identity refresh read the vendor id
   through `DispatchQueue.main.sync` from the flush timer's queue (and React

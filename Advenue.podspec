@@ -4,7 +4,7 @@
 # are CocoaPods consumers.
 Pod::Spec.new do |s|
   s.name             = 'Advenue'
-  s.version          = '1.2.0'
+  s.version          = '1.2.1'
   s.summary          = 'Advenue attribution SDK for iOS'
   s.description      = 'Open-source mobile measurement: attribution, sessions, in-app events.'
   s.homepage         = 'https://github.com/broverse/advenue'
