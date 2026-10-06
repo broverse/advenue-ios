@@ -41,6 +41,18 @@ public struct AdvenueConfig: Sendable {
   /// explicitly (documented risk — raw PII reaches ingest). Same as Android.
   public var piiScrubEnabled: Bool
 
+  /// Seconds to wait for the ATT answer before the install is enriched and
+  /// sent. Zero (the default) means today's behaviour: no wait. Set it when
+  /// the app prompts after onboarding — the IDFA read at initialize would
+  /// otherwise be missing and the install would match probabilistically.
+  ///
+  /// Only enable this if the app actually prompts: without a prompt every
+  /// install waits out the full interval. Clamped to `ATT_CONSENT_WAIT_MAX_SEC`
+  /// (Adjust v4 parity); the clamp is reported through `onError` rather than
+  /// applied silently. The wait runs only while the install is still owed and
+  /// the status is `notDetermined`; later launches never wait.
+  public var attConsentWaitingInterval: Int
+
   /// Overrides the version stamped on every event. Set by a WRAPPER SDK, never
   /// by an app.
   ///
@@ -61,6 +73,12 @@ public struct AdvenueConfig: Sendable {
     endpoint.lowercased().hasPrefix("https://")
   }
 
+  /// Clamps the ATT wait to `[0, ATT_CONSENT_WAIT_MAX_SEC]`. A pure function
+  /// so the rule is testable; `start` applies it and reports the clamp.
+  public static func clampedAttWait(_ seconds: Int) -> Int {
+    min(max(seconds, 0), ATT_CONSENT_WAIT_MAX_SEC)
+  }
+
   public init(
     apiKey: String,
     endpoint: String = DEFAULT_ENDPOINT,
@@ -75,7 +93,8 @@ public struct AdvenueConfig: Sendable {
     sdkVersion: String? = nil,
     allowInsecureHttp: Bool = false,
     debug: Bool = false,
-    piiScrubEnabled: Bool = true
+    piiScrubEnabled: Bool = true,
+    attConsentWaitingInterval: Int = 0
   ) {
     precondition(
       allowInsecureHttp || Self.isSecureEndpoint(endpoint),
@@ -93,6 +112,7 @@ public struct AdvenueConfig: Sendable {
     self.onError = onError
     self.sdkVersion = sdkVersion
     self.piiScrubEnabled = piiScrubEnabled
+    self.attConsentWaitingInterval = attConsentWaitingInterval
   }
 }
 
@@ -101,5 +121,5 @@ public struct AdvenueConfig: Sendable {
 /// release tag unless something checks. CI does, because the first question
 /// every field report raises is which build produced the event.
 public enum AdvenueVersion {
-  public static let current = "1.1.1"
+  public static let current = "1.2.0"
 }

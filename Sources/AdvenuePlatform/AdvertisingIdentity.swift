@@ -22,6 +22,21 @@ public enum TrackingAuthorization: String, Sendable {
 /// device looks like the same device.
 public let ZERO_IDFA = "00000000-0000-0000-0000-000000000000"
 
+/// The advertising identity as one snapshot: what the flush/foreground
+/// refresh hands the core. A named struct rather than a tuple — tuples are
+/// fine until they cross a boundary that wants a name.
+public struct AdvertisingSnapshot: Sendable, Equatable {
+  public var idfa: String?
+  public var vendorId: String?
+  public var limitAdTracking: Bool
+
+  public init(idfa: String? = nil, vendorId: String? = nil, limitAdTracking: Bool = false) {
+    self.idfa = idfa
+    self.vendorId = vendorId
+    self.limitAdTracking = limitAdTracking
+  }
+}
+
 /// ATT, IDFA and the vendor id.
 ///
 /// The SDK never prompts on its own: Apple gives the app control of the
@@ -70,6 +85,13 @@ public struct AdvertisingIdentity: Sendable {
   /// consent signal the user never gave.
   public var limitAdTracking: Bool {
     status == .denied || status == .restricted
+  }
+
+  /// The current values as one snapshot. Three synchronous getters — cheap
+  /// enough to call on every flush, which is exactly what the refresh does.
+  public func snapshot() -> AdvertisingSnapshot {
+    AdvertisingSnapshot(
+      idfa: advertisingId, vendorId: vendorId, limitAdTracking: limitAdTracking)
   }
 
   /// Presents the system prompt. The app decides when.

@@ -183,7 +183,15 @@ final class SeamTests: XCTestCase {
 
     var config = AdvenueConfig(apiKey: "apk_live_x")
     config.flushIntervalMs = 0
-    state.start(config, transport: transport, sources: sources)
+    // Pinned to what the sources report: in production both readers see one
+    // system, and `until`'s flushes refresh between the install task's
+    // submits — a default (nil) source here would let a poll land between
+    // setIdentity and trackInstall and stamp the install IDFA-less.
+    state.start(
+      config, transport: transport, sources: sources,
+      advertisingSource: {
+        AdvertisingSnapshot(idfa: "IDFA-seam", vendorId: "VID-seam", limitAdTracking: false)
+      })
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
 
     try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
@@ -192,6 +200,40 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(install?.adservicesToken, "tok-seam", "the Search Ads token never shipped")
     XCTAssertEqual(install?.idfa, "IDFA-seam", "the IDFA never shipped")
     XCTAssertEqual(install?.appInstanceId, "aaaaaaaabbbbbbbbccccccccdddddddd")
+  }
+
+  /// D11 through the facade: a flush picks up the CURRENT advertising
+  /// identity, not the one install enrichment saw. The init sources report no
+  /// IDFA (ATT unresolved at initialize); the refresh source reports the
+  /// granted one. If the refresh never ran, the probe would ship IDFA-less.
+  func testFlushRefreshPicksUpTheCurrentAdvertisingIdentity() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: transport, sources: Self.settledSources,
+      advertisingSource: {
+        AdvertisingSnapshot(idfa: "IDFA-refresh", vendorId: "VID-refresh", limitAdTracking: false)
+      })
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    // Let the install task finish first: its setIdentity(nil) must land before
+    // the refresh, or the test races the wiring instead of asserting it. Once
+    // the install reached the transport, the task's only remaining submit is
+    // its final flush, which writes no identity.
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
+
+    state.submit(.track(name: "probe", properties: nil, type: "custom"))
+    state.submit(.flush)
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "probe" }
+    }
+    let probe = await transport.events.first { $0.name == "probe" }
+    XCTAssertEqual(
+      probe?.idfa, "IDFA-refresh",
+      "the flush must refresh the identity from the current system values")
+    XCTAssertEqual(probe?.vendorId, "VID-refresh")
   }
 
   /// F-SDK-3, through the facade: enrichment that takes a while must not let

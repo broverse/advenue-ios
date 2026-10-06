@@ -72,6 +72,26 @@ A Swift result that disagrees with a vector means the port is wrong, not the
 vector — vectors are authored from the schemas and vendor documents, never
 generated from an implementation.
 
+## ATT wait
+
+If your app prompts for ATT after onboarding, the IDFA read at initialize is
+missing and the install matches probabilistically. `attConsentWaitingInterval`
+(seconds, default 0 = off) holds the install until the ATT answer arrives or
+the timeout lapses — Adjust parity, capped at 120 s:
+
+```swift
+Advenue.initialize(AdvenueConfig(
+  apiKey: "apk_live_…",
+  attConsentWaitingInterval: 60
+))
+```
+
+Only enable it if the app actually prompts: without a prompt every install
+waits out the full interval. Prompt at launch → 60 s is plenty; prompt after a
+tutorial → match the tutorial length (up to 120). The install timestamp stays
+at launch time, so the wait delays visibility, never the attribution window.
+Usage docs: <https://docs.advenue.io/docs/sdks/ios-native>.
+
 ## Running the tests
 
 ```bash

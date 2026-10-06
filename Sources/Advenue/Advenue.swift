@@ -138,10 +138,19 @@ public enum Advenue {
   public static func notifyBackground() { state.notifyBackground() }
 
   /// Presents the ATT prompt. The app decides when; the SDK never prompts on
-  /// its own.
+  /// its own. After resolution the advertising identity is re-read and handed
+  /// to the core — the prompt is the moment the IDFA appears (or
+  /// limitAdTracking flips), and the install-time read predates it. Through
+  /// the narrow setter: the App Instance ID is not the prompt's to clear.
   @discardableResult
   public static func requestTrackingAuthorization() async -> TrackingAuthorization {
-    await AdvertisingIdentity().requestAuthorization()
+    let status = await AdvertisingIdentity().requestAuthorization()
+    let snapshot = AdvertisingIdentity().snapshot()
+    state.submit(
+      .setAdvertisingIdentity(
+        idfa: snapshot.idfa, vendorId: snapshot.vendorId,
+        limitAdTracking: snapshot.limitAdTracking))
+    return status
   }
 
   /// Set by `AdvenueFirebase`; the base SDK knows only the shape, so
@@ -192,6 +201,16 @@ final class FacadeState: @unchecked Sendable {
   private var seenAemUrlHashes: Set<String> = []
   private var appInstanceIdProvider: (@Sendable () async -> String?)?
   private var flushTimer: DispatchSourceTimer?
+  /// The install flow, retained so `stop()` can cancel it: with an ATT wait
+  /// it can outlive the instance that started it by up to two minutes, and a
+  /// wait that finishes into a replaced pipe submits to nobody — or worse.
+  private var installTask: Task<Void, Never>?
+  /// Where the flush/foreground refresh reads the advertising identity.
+  /// Production reads the system; tests script "the user answered between
+  /// init and flush". Under the lock like everything else here.
+  private var advertisingSource: @Sendable () -> AdvertisingSnapshot = {
+    AdvertisingIdentity().snapshot()
+  }
   /// Observers on the app's own lifecycle notifications, and the machine that
   /// decides what they mean. Held so `stop()` can remove them: a stale observer
   /// submitting into a finished pipe outlives the instance that made it.
@@ -214,7 +233,8 @@ final class FacadeState: @unchecked Sendable {
     skan skanReporter: (any SkanReporter)? = nil,
     appVersion readVersion: () -> String? = readAppVersion,
     launchedInBackground: () -> Bool = readLaunchedInBackground,
-    logSink: (any AdvenueLogSink)? = nil
+    logSink: (any AdvenueLogSink)? = nil,
+    advertisingSource: (@Sendable () -> AdvertisingSnapshot)? = nil
   ) {
     // Replace-and-shut-down, never add.
     stop()
@@ -222,6 +242,15 @@ final class FacadeState: @unchecked Sendable {
     // `debug`: every swallowed failure goes through onError, so logging there
     // covers all of them — wrapped once, before anything below captures it.
     let (config, log) = withDebugLogging(config, sink: logSink)
+
+    // Clamped early and said so: a caller passing 600 must learn the wait is
+    // 120. Before the Keychain gate, so it reports on every launch —
+    // deferred or resolved, signed or not.
+    let attWaitSec = AdvenueConfig.clampedAttWait(config.attConsentWaitingInterval)
+    if attWaitSec != config.attConsentWaitingInterval {
+      config.onError(
+        "config.clamped:attConsentWaitingInterval", AdvenueSetupError.attWaitClamped)
+    }
 
     // The SDK resolves the app version itself (readAppVersion); a config value
     // is ignored — and said so, rather than looking like it took effect.
@@ -332,6 +361,7 @@ final class FacadeState: @unchecked Sendable {
     lock.lock()
     self.store = store
     self.secure = secure
+    if let advertisingSource { self.advertisingSource = advertisingSource }
     // Seeded from the same persisted values the engine loads, so consent
     // granted in a previous run is still granted after a cold start.
     self.consentMirror = store.string(forKey: CONSENT_KEY) == "granted"
@@ -345,8 +375,9 @@ final class FacadeState: @unchecked Sendable {
     // Before anything else is recorded: a launch that still owes its install
     // stamps it now and holds every flush until the install is enqueued, so
     // the server never sees this launch's session or events ahead of it. The
-    // hold outlives the enrichment deadline by a margin and then lapses.
-    pipe.submit(.beginInstall(holdMs: INSTALL_WINDOW_MS + INSTALL_HOLD_MARGIN_MS))
+    // hold covers the ATT wait plus the enrichment deadline and its margin,
+    // then lapses.
+    pipe.submit(.beginInstall(holdMs: installHoldMs(attWaitSec: attWaitSec)))
 
     // Replayed in arrival order, before the first session, so a deferred deep
     // link is attributed to the launch it belongs to.
@@ -401,25 +432,30 @@ final class FacadeState: @unchecked Sendable {
           else { return nil }
           return (challenge: challenge, result: result)
         })
-    Task { [weak self] in
-      let enrichment = await collectEnrichment(installSources, deadlineMs: INSTALL_WINDOW_MS)
-      self?.submit(
-        .setIdentity(
-          idfa: enrichment.idfa, vendorId: enrichment.vendorId,
-          appInstanceId: enrichment.appInstanceId,
-          limitAdTracking: enrichment.limitAdTracking))
-      self?.submit(.setDeviceInfo(collectDeviceInfo()))
-      // The CMP writes TCF to the standard defaults, and reading it is the
-      // difference between shipping a real consent signal and shipping none.
-      // Submitted before the install so the first event carries it.
-      if let consent = readTcf() { self?.submit(.setConsentData(consent)) }
-      self?.submit(
-        .trackInstall(
-          adservicesToken: enrichment.adservicesToken,
-          attestation: enrichment.attestation,
-          attestationChallenge: enrichment.attestationChallenge))
-      self?.submit(.flush)
+    // Whether the wait runs at all is decided up front, from the same flag
+    // the engine guards on: a launch that already sent its install never
+    // waits, whatever the interval says.
+    let installOwed = store.string(forKey: INSTALL_SENT_KEY) != "1"
+    lock.lock()
+    installTask?.cancel()
+    installTask = Task { [weak self] in
+      guard let self else { return }
+      await runInstallFlow(
+        submit: { [weak self] in self?.submit($0) },
+        sources: installSources,
+        attStatus: { AdvertisingIdentity().status },
+        attWaitMs: attWaitSec * 1000,
+        installOwed: installOwed,
+        // Wrapped, not referenced: a bare function reference warns as a
+        // non-Sendable conversion under the iOS check; the closure captures
+        // nothing, so it is Sendable.
+        deviceInfo: { collectDeviceInfo() },
+        tcf: { readTcf() },
+        deadlineMs: INSTALL_WINDOW_MS,
+        sleep: { ms in try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000) },
+        log: log)
     }
+    lock.unlock()
   }
 
   private var currentAppInstanceIdProvider: (@Sendable () async -> String?)? {
@@ -431,8 +467,27 @@ final class FacadeState: @unchecked Sendable {
   func submit(_ command: Command) {
     lock.lock()
     let pipe = self.pipe
+    let source = self.advertisingSource
     lock.unlock()
-    pipe?.submit(command)
+    guard let pipe else { return }
+    switch command {
+    case .flush, .foreground:
+      // The MMPs read the advertising identity at send time, not at init:
+      // the app may prompt through Apple's API directly, or the user may
+      // flip tracking in Settings later. Refreshing here — one choke point
+      // covering the timer, manual flushes, backgrounding and session open —
+      // gives the same freshness. Cheap synchronous getters; on platforms
+      // without ATT they return the same nils init produced. `track` stays
+      // untouched: it is the hot path and history is not rewritten.
+      let current = source()
+      pipe.submit(
+        .setAdvertisingIdentity(
+          idfa: current.idfa, vendorId: current.vendorId,
+          limitAdTracking: current.limitAdTracking))
+      pipe.submit(command)
+    default:
+      pipe.submit(command)
+    }
   }
 
   /// Erasure spans BOTH stores. The engine clears what lives in UserDefaults;
@@ -654,15 +709,19 @@ final class FacadeState: @unchecked Sendable {
     let pipe = self.pipe
     let timer = flushTimer
     let observers = lifecycleObservers
+    let install = installTask
     self.pipe = nil
     flushTimer = nil
     lifecycleObservers = []
+    installTask = nil
     lock.unlock()
     // Cancel before the pipe shuts down: a timer firing into a finished stream
     // is harmless, but leaving it running leaks a repeating source per
     // initialize() call. The observers go for the same reason, one instance
-    // further out.
+    // further out. The install task can be mid-wait for up to two minutes —
+    // without the cancel it would submit a stale install into the next pipe.
     timer?.cancel()
+    install?.cancel()
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
     pipe?.shutdown()
   }

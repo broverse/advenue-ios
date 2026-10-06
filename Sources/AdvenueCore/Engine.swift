@@ -189,6 +189,19 @@ public actor AdvenueEngine {
     self.limitAdTracking = limitAdTracking
   }
 
+  /// Refreshes the advertising identity without touching the App Instance ID.
+  /// Narrow on purpose: the refresh fires on every flush and foreground, and
+  /// folding it into the three-field setter would clear an id the install
+  /// enrichment resolved — on every tick, for the life of the app. Same
+  /// separation rationale as `setAppInstanceId` below.
+  public func setAdvertisingIdentity(
+    idfa: String?, vendorId: String?, limitAdTracking: Bool?
+  ) {
+    self.idfa = idfa
+    self.vendorId = vendorId
+    self.limitAdTracking = limitAdTracking
+  }
+
   /// The Firebase App Instance ID alone. Separate from `setIdentity` because it
   /// arrives on its own schedule — an app can set it at any point, and folding
   /// it into the three-field setter would clear the advertising identity the
@@ -547,6 +560,7 @@ public enum Command: Sendable {
   case background
   case flush
   case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?, limitAdTracking: Bool? = nil)
+  case setAdvertisingIdentity(idfa: String?, vendorId: String?, limitAdTracking: Bool?)
   case setAppInstanceId(String?)
   case setConsentData(Consent?)
   case setPushToken(token: String?, provider: String?)
@@ -617,6 +631,9 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setIdentity(
         idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId,
         limitAdTracking: limitAdTracking)
+    case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking):
+      await engine.setAdvertisingIdentity(
+        idfa: idfa, vendorId: vendorId, limitAdTracking: limitAdTracking)
     case .setAppInstanceId(let id):
       await engine.setAppInstanceId(id)
     case .beginInstall(let holdMs):

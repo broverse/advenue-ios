@@ -3,6 +3,24 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
+## 1.2.0
+
+- **ATT wait (`attConsentWaitingInterval`).** Opt-in seconds to wait for the
+  ATT answer before the install is enriched and sent (Adjust parity, capped at
+  120 s, clamped values reported as `config.clamped:attConsentWaitingInterval`).
+  Default 0 preserves today's behaviour. Set it when the app prompts after
+  onboarding — otherwise the install ships IDFA-less and matches
+  probabilistically. Only enable it if the app actually prompts. The install
+  timestamp stays at launch time, so the wait delays visibility, never the
+  attribution window.
+- **IDFA re-read after the prompt.** `requestTrackingAuthorization()` hands the
+  resolved identity back to the core; before, a granted permission reached no
+  event.
+- **Identity refresh on flush and foreground.** The advertising identity is
+  re-read at send time (the MMP model), so apps that prompt through Apple's
+  API directly — or users who flip tracking in Settings — are picked up on
+  the next event. Never touches the App Instance ID.
+
 ## 1.1.1
 
 - **Swift 6 main-actor reads.** `UIScreen.main`, `UIDevice.current` and
