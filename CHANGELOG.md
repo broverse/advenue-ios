@@ -3,7 +3,7 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
-## Unreleased
+## 1.3.0 (2026-10-12)
 
 - **`attStatus` on every event.** The ATT status (`authorized` / `denied` /
   `restricted` / `not_determined`) now rides every event, seeded at initialize
