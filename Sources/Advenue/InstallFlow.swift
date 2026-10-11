@@ -48,7 +48,8 @@ func runInstallFlow(
     .setIdentity(
       idfa: enrichment.idfa, vendorId: enrichment.vendorId,
       appInstanceId: enrichment.appInstanceId,
-      limitAdTracking: enrichment.limitAdTracking))
+      limitAdTracking: enrichment.limitAdTracking,
+      attStatus: enrichment.attStatus?.rawValue))
   submit(.setDeviceInfo(deviceInfo()))
   // The CMP writes TCF to the standard defaults, and reading it is the
   // difference between shipping a real consent signal and shipping none.

@@ -20,13 +20,17 @@ public struct Enrichment: Sendable, Equatable {
   public var adservicesToken: String?
   /// B2: reklam takibi sınırlama bayrağı — düşürülüyordu, artık olaya işlenir.
   public var limitAdTracking: Bool
+  /// Read with the IDFA, after any ATT wait, so the install's status and its
+  /// identifier describe the same moment.
+  public var attStatus: TrackingAuthorization?
 
   public init(
     idfa: String? = nil, vendorId: String? = nil,
     appInstanceId: String? = nil, adservicesToken: String? = nil,
     attestation: AttestationResult? = nil, attestationChallenge: String? = nil,
-    limitAdTracking: Bool = false
+    limitAdTracking: Bool = false, attStatus: TrackingAuthorization? = nil
   ) {
+    self.attStatus = attStatus
     self.attestation = attestation
     self.attestationChallenge = attestationChallenge
     self.idfa = idfa
@@ -46,6 +50,8 @@ public struct EnrichmentSources: Sendable {
   /// B2: ATT sınırlama bayrağı. Ayrı kapanış — advertisingId demetini
   /// değiştirmek mevcut sahte kaynakları kırardı.
   public var limitAdTracking: @Sendable () -> Bool
+  /// The ATT status. Separate for the same reason as `limitAdTracking`.
+  public var attStatus: @Sendable () -> TrackingAuthorization?
   public var appInstanceId: @Sendable () async -> String?
   /// Returns the attested challenge and its result, or nil. Every failure path
   /// — unsupported device, challenge fetch, attest — yields nil, because an
@@ -59,8 +65,10 @@ public struct EnrichmentSources: Sendable {
     attestation: @escaping @Sendable () async -> (challenge: String, result: AttestationResult)? = {
       nil
     },
-    limitAdTracking: @escaping @Sendable () -> Bool = { false }
+    limitAdTracking: @escaping @Sendable () -> Bool = { false },
+    attStatus: @escaping @Sendable () -> TrackingAuthorization? = { nil }
   ) {
+    self.attStatus = attStatus
     self.searchAdsToken = searchAdsToken
     self.advertisingId = advertisingId
     self.appInstanceId = appInstanceId
@@ -83,7 +91,8 @@ public struct EnrichmentSources: Sendable {
       },
       appInstanceId: { await appInstanceIdProvider?() },
       attestation: { await attestation?() },
-      limitAdTracking: { AdvertisingIdentity().limitAdTracking })
+      limitAdTracking: { AdvertisingIdentity().limitAdTracking },
+      attStatus: { AdvertisingIdentity().status })
   }
 }
 
@@ -102,7 +111,7 @@ public func collectEnrichment(
   let ids = sources.advertisingId()
   var result = Enrichment(
     idfa: ids.idfa, vendorId: ids.vendorId,
-    limitAdTracking: sources.limitAdTracking())
+    limitAdTracking: sources.limitAdTracking(), attStatus: sources.attStatus())
 
   await withTaskGroup(of: (String, String?).self) { group in
     group.addTask { ("adservices", await sources.searchAdsToken()) }

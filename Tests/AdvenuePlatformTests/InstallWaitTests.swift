@@ -39,7 +39,8 @@ final class InstallWaitTests: XCTestCase {
     statusValues: [TrackingAuthorization],
     attWaitMs: Int,
     installOwed: Bool,
-    idfa: String?
+    idfa: String?,
+    enrichedStatus: TrackingAuthorization? = nil
   ) async -> FlowResult {
     let events = Locked<[String]>([])
     let idx = Locked(0)
@@ -57,7 +58,8 @@ final class InstallWaitTests: XCTestCase {
       },
       appInstanceId: { nil },
       attestation: { nil },
-      limitAdTracking: { false })
+      limitAdTracking: { false },
+      attStatus: { enrichedStatus })
     let submitted = Locked<[Command]>([])
     await runInstallFlow(
       submit: { cmd in submitted.mutate { $0.append(cmd) } },
@@ -83,7 +85,7 @@ final class InstallWaitTests: XCTestCase {
     XCTAssertEqual(
       result.commands.map(kind),
       ["extendHold", "setIdentity", "setDeviceInfo", "trackInstall", "flush"])
-    guard case .setIdentity(let idfa, _, _, _) = result.commands.dropFirst().first else {
+    guard case .setIdentity(let idfa, _, _, _, _) = result.commands.dropFirst().first else {
       return XCTFail("the identity must follow the re-armed hold")
     }
     XCTAssertEqual(idfa, "IDFA-POST-WAIT")
@@ -97,6 +99,21 @@ final class InstallWaitTests: XCTestCase {
     XCTAssertGreaterThan(enrichAt, lastStatus)
   }
 
+  /// The install's identity carries the ATT status enrichment read after the
+  /// wait — not the gate's `notDetermined`, which would put an IDFA under a
+  /// status that says tracking was never answered.
+  func testTheInstallIdentityCarriesTheResolvedAttStatus() async {
+    let result = await runFlow(
+      statusValues: [.notDetermined, .authorized],
+      attWaitMs: 60_000, installOwed: true, idfa: "IDFA-POST-WAIT",
+      enrichedStatus: .authorized)
+
+    guard case .setIdentity(_, _, _, _, let attStatus) = result.commands.dropFirst().first else {
+      return XCTFail("the identity must follow the re-armed hold")
+    }
+    XCTAssertEqual(attStatus, "authorized")
+  }
+
   func testNoWaitWhenAlreadyAuthorized() async {
     let result = await runFlow(
       statusValues: [.authorized], attWaitMs: 60_000,
@@ -104,7 +121,7 @@ final class InstallWaitTests: XCTestCase {
 
     XCTAssertFalse(result.events.contains("sleep"), "a determined status never waits")
     XCTAssertEqual(result.events.filter { $0 == "status" }.count, 1, "gate read only")
-    guard case .setIdentity(let idfa, _, _, _) = result.commands.first else {
+    guard case .setIdentity(let idfa, _, _, _, _) = result.commands.first else {
       return XCTFail("the first submit must be the identity")
     }
     XCTAssertEqual(idfa, "IDFA-1")
@@ -120,7 +137,7 @@ final class InstallWaitTests: XCTestCase {
       result.commands.map(kind),
       ["extendHold", "setIdentity", "setDeviceInfo", "trackInstall", "flush"],
       "a timeout costs enrichment, never the install")
-    guard case .setIdentity(let idfa, _, _, _) = result.commands.dropFirst().first else {
+    guard case .setIdentity(let idfa, _, _, _, _) = result.commands.dropFirst().first else {
       return XCTFail("the first submit must be the identity")
     }
     XCTAssertNil(idfa)

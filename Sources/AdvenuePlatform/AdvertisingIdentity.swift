@@ -29,11 +29,18 @@ public struct AdvertisingSnapshot: Sendable, Equatable {
   public var idfa: String?
   public var vendorId: String?
   public var limitAdTracking: Bool
+  /// The status the other three were derived from. Optional so a scripted
+  /// snapshot that does not care leaves the engine's last known value alone.
+  public var attStatus: TrackingAuthorization?
 
-  public init(idfa: String? = nil, vendorId: String? = nil, limitAdTracking: Bool = false) {
+  public init(
+    idfa: String? = nil, vendorId: String? = nil, limitAdTracking: Bool = false,
+    attStatus: TrackingAuthorization? = nil
+  ) {
     self.idfa = idfa
     self.vendorId = vendorId
     self.limitAdTracking = limitAdTracking
+    self.attStatus = attStatus
   }
 }
 
@@ -91,7 +98,8 @@ public struct AdvertisingIdentity: Sendable {
   /// enough to call on every flush, which is exactly what the refresh does.
   public func snapshot() -> AdvertisingSnapshot {
     AdvertisingSnapshot(
-      idfa: advertisingId, vendorId: vendorId, limitAdTracking: limitAdTracking)
+      idfa: advertisingId, vendorId: vendorId, limitAdTracking: limitAdTracking,
+      attStatus: status)
   }
 
   /// The same snapshot without ever blocking on the main thread: `vendorId`
@@ -104,7 +112,7 @@ public struct AdvertisingIdentity: Sendable {
   public func nonBlockingSnapshot() -> AdvertisingSnapshot {
     AdvertisingSnapshot(
       idfa: advertisingId, vendorId: Thread.isMainThread ? vendorId : nil,
-      limitAdTracking: limitAdTracking)
+      limitAdTracking: limitAdTracking, attStatus: status)
   }
 
   /// Presents the system prompt. The app decides when.

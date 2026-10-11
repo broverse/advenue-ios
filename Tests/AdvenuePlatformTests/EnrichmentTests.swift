@@ -26,6 +26,19 @@ final class EnrichmentTests: XCTestCase {
     XCTAssertEqual(result.vendorId, "VID-1")
   }
 
+  /// Read with the IDFA, so the install's status and identifier agree.
+  func testTheAttStatusIsCollectedWithTheIdfa() async {
+    let sources = EnrichmentSources(
+      searchAdsToken: { nil },
+      advertisingId: { (idfa: "IDFA-1", vendorId: nil) },
+      appInstanceId: { nil },
+      attStatus: { .authorized })
+
+    let result = await collectEnrichment(sources, deadlineMs: 300)
+
+    XCTAssertEqual(result.attStatus, .authorized)
+  }
+
   func testEverythingReadyIsCollected() async {
     let sources = EnrichmentSources(
       searchAdsToken: { "tok-1" },

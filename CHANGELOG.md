@@ -3,6 +3,20 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
+## Unreleased
+
+- **`attStatus` on every event.** The ATT status (`authorized` / `denied` /
+  `restricted` / `not_determined`) now rides every event, seeded at initialize
+  and moved by the same flush/foreground refresh as the IDFA; the install
+  carries the status read alongside its IDFA after the ATT wait. The server's
+  outbound privacy layer decides what each postback may share from it.
+- **Disk space is no longer collected.** `totalStorageGb` / `freeStorageGb`
+  are gone from the install's device info: no network needs them, the server
+  stopped forwarding them, and the SDK no longer touches Apple's
+  required-reason disk-space API.
+- `installationId` was already on every event; it is now pinned by tests for
+  custom, session and install events.
+
 ## 1.2.1
 
 - **No `main.sync` on every flush.** The identity refresh read the vendor id

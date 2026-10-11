@@ -149,7 +149,7 @@ public enum Advenue {
     state.submit(
       .setAdvertisingIdentity(
         idfa: snapshot.idfa, vendorId: snapshot.vendorId,
-        limitAdTracking: snapshot.limitAdTracking))
+        limitAdTracking: snapshot.limitAdTracking, attStatus: snapshot.attStatus?.rawValue))
     return status
   }
 
@@ -313,7 +313,8 @@ final class FacadeState: @unchecked Sendable {
         osVersion: osVersion,
         sdkVersion: String((config.sdkVersion ?? AdvenueVersion.current).prefix(32)),
         requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,
-        batchSize: config.batchSize, piiScrubEnabled: config.piiScrubEnabled),
+        batchSize: config.batchSize, piiScrubEnabled: config.piiScrubEnabled,
+        attStatus: AdvertisingIdentity().status.rawValue),
       store: store, clock: SystemClock(), scheduler: TimerScheduler(), uuid: uuid,
       transport: eventTransport,
       onError: config.onError)
@@ -489,17 +490,18 @@ final class FacadeState: @unchecked Sendable {
       pipe.submit(
         .setAdvertisingIdentity(
           idfa: current.idfa, vendorId: resolveVendorId(current.vendorId),
-          limitAdTracking: current.limitAdTracking))
+          limitAdTracking: current.limitAdTracking, attStatus: current.attStatus?.rawValue))
       pipe.submit(command)
-    case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking):
+    case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking, let attStatus):
       pipe.submit(
         .setIdentity(
           idfa: idfa, vendorId: resolveVendorId(vendorId), appInstanceId: appInstanceId,
-          limitAdTracking: limitAdTracking))
-    case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking):
+          limitAdTracking: limitAdTracking, attStatus: attStatus))
+    case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking, let attStatus):
       pipe.submit(
         .setAdvertisingIdentity(
-          idfa: idfa, vendorId: resolveVendorId(vendorId), limitAdTracking: limitAdTracking))
+          idfa: idfa, vendorId: resolveVendorId(vendorId), limitAdTracking: limitAdTracking,
+          attStatus: attStatus))
     default:
       pipe.submit(command)
     }

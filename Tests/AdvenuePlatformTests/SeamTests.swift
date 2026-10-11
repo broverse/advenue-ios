@@ -236,6 +236,40 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(probe?.vendorId, "VID-refresh")
   }
 
+  /// Task 15 through the facade: the flush refresh carries the CURRENT ATT
+  /// status onto the events that follow, and every event carries the
+  /// installation id. A user who revoked tracking in Settings must not keep
+  /// shipping "authorized".
+  func testFlushRefreshStampsTheCurrentAttStatusAndTheInstallationId() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: transport, sources: Self.settledSources,
+      advertisingSource: {
+        AdvertisingSnapshot(
+          idfa: nil, vendorId: "VID-refresh", limitAdTracking: true, attStatus: .denied)
+      })
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
+
+    state.submit(.track(name: "probe", properties: nil, type: "custom"))
+    state.submit(.flush)
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "probe" }
+    }
+    let probe = await transport.events.first { $0.name == "probe" }
+    XCTAssertEqual(probe?.attStatus, "denied")
+    XCTAssertEqual(probe?.limitAdTracking, true)
+    let events = await transport.events
+    for event in events {
+      XCTAssertNotNil(event.installationId, "\(event.name) shipped without the installation id")
+      XCTAssertNotNil(event.attStatus, "\(event.name) shipped without the ATT status")
+    }
+  }
+
   /// The refresh reads the vendor id only on the main thread — off it (the
   /// flush timer, React Native's JS thread) it reports nil rather than block
   /// on `main.sync`. That nil must not clear the id install enrichment read.

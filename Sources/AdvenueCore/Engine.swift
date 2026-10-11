@@ -5,6 +5,9 @@ public struct EngineConfig: Sendable {
   public var platform: String
   public var deviceId: String
   public var installationId: String?
+  /// ATT status read at initialize. Seeds the engine so the events recorded
+  /// before the first refresh or the install enrichment still carry one.
+  public var attStatus: String?
   public var appVersion: String?
   public var osVersion: String?
   public var sdkVersion: String?
@@ -25,8 +28,10 @@ public struct EngineConfig: Sendable {
     requireConsent: Bool = false, sessionWindowMs: Int64 = DEFAULT_SESSION_WINDOW_MS,
     maxQueueSize: Int = 10_000, batchSize: Int = 20,
     retryBaseMs: Double = 1_000, retryCapMs: Double = 60_000,
-    piiScrubEnabled: Bool = true
+    piiScrubEnabled: Bool = true,
+    attStatus: String? = nil
   ) {
+    self.attStatus = attStatus
     self.batchSize = batchSize
     self.retryBaseMs = retryBaseMs
     self.retryCapMs = retryCapMs
@@ -130,6 +135,7 @@ public actor AdvenueEngine {
       store: store, clock: clock, windowMs: config.sessionWindowMs, uuid: uuid)
     self.consent = store.string(forKey: CONSENT_KEY) == "granted"
     self.consentData = readPersistedConsentData(store)
+    self.attStatus = config.attStatus
   }
 
   /// Enqueues an event, or refuses it and says why. Returns whether it was
@@ -157,6 +163,7 @@ public actor AdvenueEngine {
     event.idfa = idfa
     // B2: rıza bayrağı olaya işlenir.
     event.limitAdTracking = limitAdTracking
+    event.attStatus = attStatus
     event.vendorId = vendorId
     event.appInstanceId = appInstanceId
     event.consent = consentData
@@ -178,15 +185,21 @@ public actor AdvenueEngine {
   /// change between them.
   /// B2: rıza bayrağı — her olaya işlenir, persist edilmez (kimlik gibi).
   private var limitAdTracking: Bool?
+  /// The ATT status stamped on every event, moved by the same refreshes as
+  /// the IDFA. A nil argument to either setter means "not read" and keeps the
+  /// last known value: erasing it would ship events with no status at all,
+  /// which the server can only treat as a guess.
+  private var attStatus: String?
 
   public func setIdentity(
     idfa: String?, vendorId: String?, appInstanceId: String?,
-    limitAdTracking: Bool? = nil
+    limitAdTracking: Bool? = nil, attStatus: String? = nil
   ) {
     self.idfa = idfa
     self.vendorId = vendorId
     self.appInstanceId = appInstanceId
     self.limitAdTracking = limitAdTracking
+    if let attStatus { self.attStatus = attStatus }
   }
 
   /// Refreshes the advertising identity without touching the App Instance ID.
@@ -195,11 +208,12 @@ public actor AdvenueEngine {
   /// enrichment resolved — on every tick, for the life of the app. Same
   /// separation rationale as `setAppInstanceId` below.
   public func setAdvertisingIdentity(
-    idfa: String?, vendorId: String?, limitAdTracking: Bool?
+    idfa: String?, vendorId: String?, limitAdTracking: Bool?, attStatus: String? = nil
   ) {
     self.idfa = idfa
     self.vendorId = vendorId
     self.limitAdTracking = limitAdTracking
+    if let attStatus { self.attStatus = attStatus }
   }
 
   /// The Firebase App Instance ID alone. Separate from `setIdentity` because it
@@ -283,6 +297,7 @@ public actor AdvenueEngine {
     event.idfa = idfa
     // B2: rıza bayrağı install olayına da işlenir.
     event.limitAdTracking = limitAdTracking
+    event.attStatus = attStatus
     event.vendorId = vendorId
     event.appInstanceId = appInstanceId
     event.consent = consentData
@@ -569,8 +584,11 @@ public enum Command: Sendable {
   case foreground
   case background
   case flush
-  case setIdentity(idfa: String?, vendorId: String?, appInstanceId: String?, limitAdTracking: Bool? = nil)
-  case setAdvertisingIdentity(idfa: String?, vendorId: String?, limitAdTracking: Bool?)
+  case setIdentity(
+    idfa: String?, vendorId: String?, appInstanceId: String?, limitAdTracking: Bool? = nil,
+    attStatus: String? = nil)
+  case setAdvertisingIdentity(
+    idfa: String?, vendorId: String?, limitAdTracking: Bool?, attStatus: String? = nil)
   case setAppInstanceId(String?)
   case setConsentData(Consent?)
   case setPushToken(token: String?, provider: String?)
@@ -638,13 +656,13 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.notifyBackground()
     case .flush:
       await engine.flush()
-    case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking):
+    case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking, let attStatus):
       await engine.setIdentity(
         idfa: idfa, vendorId: vendorId, appInstanceId: appInstanceId,
-        limitAdTracking: limitAdTracking)
-    case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking):
+        limitAdTracking: limitAdTracking, attStatus: attStatus)
+    case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking, let attStatus):
       await engine.setAdvertisingIdentity(
-        idfa: idfa, vendorId: vendorId, limitAdTracking: limitAdTracking)
+        idfa: idfa, vendorId: vendorId, limitAdTracking: limitAdTracking, attStatus: attStatus)
     case .setAppInstanceId(let id):
       await engine.setAppInstanceId(id)
     case .extendInstallHold(let holdMs):

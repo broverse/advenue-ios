@@ -59,6 +59,12 @@ public struct ClientEvent: Codable, Sendable, Equatable {
   public var attestationChallenge: String?
   public var deviceCheckToken: String?
   public var adservicesToken: String?
+  /// ATT status (`authorized` / `denied` / `restricted` / `not_determined`)
+  /// as of the latest identity refresh — the same snapshot the IDFA and
+  /// `limitAdTracking` on this event came from, so the three never disagree.
+  /// The server's outbound privacy layer decides what a postback may share
+  /// from it. Absent (never null) when the platform cannot report it.
+  public var attStatus: String?
 
   public init(
     id: String, deviceId: String, type: String, name: String, timestamp: String, platform: String
@@ -112,6 +118,7 @@ public struct ClientEvent: Codable, Sendable, Equatable {
     attestationChallenge = try c.decodeIfPresent(String.self, forKey: .attestationChallenge)
     deviceCheckToken = try c.decodeIfPresent(String.self, forKey: .deviceCheckToken)
     adservicesToken = try c.decodeIfPresent(String.self, forKey: .adservicesToken)
+    attStatus = try c.decodeIfPresent(String.self, forKey: .attStatus)
     consent = try c.decodeIfPresent(Consent.self, forKey: .consent)
     properties = try c.decodeIfPresent([String: AdvenueValue].self, forKey: .properties)
   }

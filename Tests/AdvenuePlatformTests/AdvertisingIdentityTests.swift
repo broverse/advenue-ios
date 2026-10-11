@@ -15,4 +15,12 @@ final class AdvertisingIdentityTests: XCTestCase {
       XCTAssertNil(vendorId)
     #endif
   }
+
+  /// The flush/foreground refresh hands the core one snapshot; the ATT status
+  /// must be in it, read alongside the IDFA and limitAdTracking it explains.
+  func testSnapshotsCarryTheAttStatus() {
+    let identity = AdvertisingIdentity()
+    XCTAssertEqual(identity.snapshot().attStatus, identity.status)
+    XCTAssertEqual(identity.nonBlockingSnapshot().attStatus, identity.status)
+  }
 }

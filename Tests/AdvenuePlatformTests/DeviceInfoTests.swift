@@ -19,9 +19,15 @@ final class DeviceInfoTests: XCTestCase {
     // because downstream that is indistinguishable from a measurement.
     if case .int(let cores)? = info["cpuCores"] { XCTAssertGreaterThan(cores, 0) }
     if case .int(let width)? = info["screenWidth"] { XCTAssertGreaterThan(width, 0) }
-    if case .double(let storage)? = info["totalStorageGb"] {
-      XCTAssertGreaterThan(storage, 0)
-    }
+  }
+
+  /// P-7: disk size is a fingerprinting signal no network needs and the
+  /// server no longer forwards. The SDK must stop collecting it, not just
+  /// rely on the server stripping it.
+  func testDiskSpaceIsNotCollected() {
+    let info = collectDeviceInfo()
+    XCTAssertNil(info["totalStorageGb"])
+    XCTAssertNil(info["freeStorageGb"])
   }
 
   /// `UIDevice.model` answers "iPhone" for every iPhone ever made. Meta's

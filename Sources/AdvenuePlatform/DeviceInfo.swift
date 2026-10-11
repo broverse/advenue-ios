@@ -70,17 +70,10 @@ public func collectDeviceInfo() -> [String: AdvenueValue] {
     info["screenDensity"] = .double(Double(scale))
   #endif
 
-  if let attributes = try? FileManager.default.attributesOfFileSystem(
-    forPath: NSHomeDirectory())
-  {
-    let gigabyte = 1024.0 * 1024.0 * 1024.0
-    if let total = attributes[.systemSize] as? NSNumber {
-      info["totalStorageGb"] = .double(total.doubleValue / gigabyte)
-    }
-    if let free = attributes[.systemFreeSize] as? NSNumber {
-      info["freeStorageGb"] = .double(free.doubleValue / gigabyte)
-    }
-  }
+  // Disk size and free space are deliberately not collected (outbound privacy
+  // P-7): a fingerprinting signal no network needs, which the server stopped
+  // forwarding. Not reading it also keeps the SDK off Apple's required-reason
+  // disk-space API.
 
   return info
 }
