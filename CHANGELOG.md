@@ -13,7 +13,9 @@ stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 - **Disk space is no longer collected.** `totalStorageGb` / `freeStorageGb`
   are gone from the install's device info: no network needs them, the server
   stopped forwarding them, and the SDK no longer touches Apple's
-  required-reason disk-space API.
+  required-reason disk-space API. The `DiskSpace` required-reason
+  declaration, which earlier React Native and Flutter privacy manifests
+  were missing, is therefore no longer needed.
 - `installationId` was already on every event; it is now pinned by tests for
   custom, session and install events.
 
