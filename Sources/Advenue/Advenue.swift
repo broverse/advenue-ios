@@ -360,7 +360,8 @@ final class FacadeState: @unchecked Sendable {
   /// Under `lock`.
   private var storeOwner = 0
   /// Set by `forgetMe` until the next start installs a pipe: settings made in
-  /// between go straight to the store, as the erased engine used to write them.
+  /// between go straight to the store, as the erased engine used to write them,
+  /// and deep links are dropped, as it dropped them (FM1).
   private var erased = false
   /// Test surfaces: every pipe built, and every buffered setting applied.
   var onPipeCreated: ((CommandPipe) -> Void)?
@@ -933,6 +934,10 @@ final class FacadeState: @unchecked Sendable {
       storeOwner += 1
       let detached = detachLocked()
       resetBuffer = nil
+      // FM1: links buffered before the erasure (a reset's drain buffers them,
+      // K7) belong to the identity being erased: dropped, not replayed under
+      // the next one.
+      pendingDeepLinks = []
       erased = true
       // Erasure clears the read caches too: a getter still answering
       // "granted" after forgetMe would report a consent the device no longer
@@ -1257,7 +1262,10 @@ final class FacadeState: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     guard let pipe else {
-      pendingDeepLinks.append(url)
+      // FM1: after forgetMe, until the next start, the link is dropped, as the
+      // erased engine dropped it. Before the first start, or during a reset's
+      // drain (K7), it waits for the next pipe.
+      if !erased { pendingDeepLinks.append(url) }
       return
     }
     pipe.submit(track)

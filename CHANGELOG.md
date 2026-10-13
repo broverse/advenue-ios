@@ -30,6 +30,10 @@ stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 - `forgetMe()` now also stops the SDK until the next `initialize` (an erased
   SDK already recorded nothing). The erasure is complete when it returns;
   consent or a user id set afterwards is still saved for the next start.
+- A deep link received after `forgetMe()` and before the next `initialize` is
+  dropped, as before this release; one buffered before the erasure (for
+  example during `resetInstall()`) is dropped by the erasure. Neither is sent under
+  the next identity.
 
 ## 1.3.0 (2026-10-12)
 

@@ -1308,6 +1308,77 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(state.bufferedDeepLinkCount, 0)
   }
 
+  /// Starts a sandbox SDK on `transport`, then sends a sentinel and waits for
+  /// it: anything the start replayed is queued ahead of it, so once the
+  /// sentinel is seen, a replayed deep link would have been seen too.
+  private func startAndAwaitSentinel(
+    _ state: FacadeState, transport: RecordingEventTransport
+  ) async throws {
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.submit(.track(name: "fm1_sentinel", properties: nil, type: "custom"))
+    state.submit(.flush)
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "fm1_sentinel" }
+    }
+  }
+
+  /// FM1: a link buffered while the reset drains belongs to the identity that
+  /// forgetMe erases. It is dropped with everything else, not replayed under
+  /// the next identity.
+  func testALinkBufferedInTheDrainDoesNotSurviveForgetMe() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    let reset = try await startResetInTheDrain(state, transport: transport)
+    state.deepLink(try XCTUnwrap(URL(string: "https://example.com/before-erasure")))
+    XCTAssertEqual(state.bufferedDeepLinkCount, 1, "precondition: buffered by the drain")
+
+    state.forgetMe()
+    let newTransport = RecordingEventTransport()
+    try await startAndAwaitSentinel(state, transport: newTransport)
+    await transport.release()
+    _ = await reset.value
+
+    let sent = await newTransport.events + transport.events
+    XCTAssertFalse(
+      sent.contains { $0.name == "deep_link" }, "a link from before the erasure was sent")
+    XCTAssertEqual(state.bufferedDeepLinkCount, 0)
+  }
+
+  /// FM1: after forgetMe and until the next initialize, a deep link is
+  /// dropped, as the erased engine dropped it: it is neither buffered nor
+  /// replayed under the next identity.
+  func testADeepLinkAfterForgetMeIsDropped() async throws {
+    let state = newState()
+    let first = RecordingEventTransport()
+    try await startAndAwaitSentinel(state, transport: first)
+    state.forgetMe()
+
+    state.deepLink(try XCTUnwrap(URL(string: "https://example.com/after-erasure")))
+    let next = RecordingEventTransport()
+    try await startAndAwaitSentinel(state, transport: next)
+
+    let sent = await first.events + next.events
+    XCTAssertFalse(sent.contains { $0.name == "deep_link" }, "an erased SDK sent a link")
+    XCTAssertEqual(state.bufferedDeepLinkCount, 0)
+  }
+
+  /// FM1 control: a link that arrives before the first initialize is still
+  /// buffered and replayed by it.
+  func testADeepLinkBeforeTheFirstInitializeIsStillReplayed() async throws {
+    let state = newState()
+    state.deepLink(try XCTUnwrap(URL(string: "https://example.com/cold-start")))
+    XCTAssertEqual(state.bufferedDeepLinkCount, 1)
+    let transport = RecordingEventTransport()
+    try await startAndAwaitSentinel(state, transport: transport)
+
+    let sent = await transport.events
+    XCTAssertTrue(sent.contains { $0.name == "deep_link" }, "the cold-start link was lost")
+    XCTAssertEqual(state.bufferedDeepLinkCount, 0)
+  }
+
   /// K8: the restart defers identity (the Keychain cannot be read), but the
   /// reset is done and the new id is the device's: it is returned, not nil.
   func testAResetWhoseRestartDefersIdentityReturnsTheNewId() async throws {
