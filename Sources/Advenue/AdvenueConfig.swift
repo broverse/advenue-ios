@@ -69,6 +69,12 @@ public struct AdvenueConfig: Sendable {
   /// the whole batch down with a 400, so it is truncated rather than sent.
   public var sdkVersion: String?
 
+  /// `.sandbox` sends every event to the sandbox store: it shows in the
+  /// dashboard's sandbox view, is deleted after 14 days, and never reaches
+  /// reports, postbacks or billing. Read-only after `initialize`. Set it back
+  /// to `.production` before release — the SDK logs a warning at every start.
+  public var environment: AdvenueEnvironment
+
   /// B5: `https://` şema kuralı. Fail-fast `precondition` ile kurulumda
   /// yakalanır; kuralın kendisi test edilebilir saf fonksiyondur.
   public static func isSecureEndpoint(_ endpoint: String) -> Bool {
@@ -96,7 +102,8 @@ public struct AdvenueConfig: Sendable {
     allowInsecureHttp: Bool = false,
     debug: Bool = false,
     piiScrubEnabled: Bool = true,
-    attConsentWaitingInterval: Int = 0
+    attConsentWaitingInterval: Int = 0,
+    environment: AdvenueEnvironment = .production
   ) {
     precondition(
       allowInsecureHttp || Self.isSecureEndpoint(endpoint),
@@ -115,6 +122,7 @@ public struct AdvenueConfig: Sendable {
     self.sdkVersion = sdkVersion
     self.piiScrubEnabled = piiScrubEnabled
     self.attConsentWaitingInterval = attConsentWaitingInterval
+    self.environment = environment
   }
 }
 
@@ -123,5 +131,5 @@ public struct AdvenueConfig: Sendable {
 /// release tag unless something checks. CI does, because the first question
 /// every field report raises is which build produced the event.
 public enum AdvenueVersion {
-  public static let current = "1.3.0"
+  public static let current = "1.4.0"
 }

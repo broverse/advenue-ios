@@ -246,7 +246,8 @@ final class FacadeState: @unchecked Sendable {
 
     // `debug`: every swallowed failure goes through onError, so logging there
     // covers all of them — wrapped once, before anything below captures it.
-    let (config, log) = withDebugLogging(config, sink: logSink)
+    let (debugConfig, log) = withDebugLogging(config, sink: logSink)
+    let config = withSandboxNotices(debugConfig, sink: logSink)
 
     // Clamped early and said so: a caller passing 600 must learn the wait is
     // 120. Before the Keychain gate, so it reports on every launch —
@@ -273,6 +274,14 @@ final class FacadeState: @unchecked Sendable {
       store = UserDefaultsStore()
       config.onError("store.cache_unavailable", AdvenueSetupError.cacheUnavailable)
     }
+    let scheduler = TimerScheduler()
+    // Spec 2 §7.2: a changed environment starts clean — before the engine
+    // loads the queue and before the install flag is read below.
+    if let dropped = reconcileEnvironment(config.environment, store: store, scheduler: scheduler) {
+      (logSink ?? UnifiedLogSink()).log(
+        "Advenue: environment changed to \(config.environment.rawValue); dropped \(dropped) queued event(s). A new install will be recorded."
+      )
+    }
     let secure = KeychainStore()
     let uuid = SystemUUIDs()
 
@@ -297,6 +306,7 @@ final class FacadeState: @unchecked Sendable {
       ?? HttpTransport(
         endpoint: config.endpoint, apiKey: config.apiKey,
         signingSecret: config.signingSecret,
+        environment: config.environment,
         // Diagnostics only: it runs after the batch is already accepted, so
         // nothing it does can turn a successful ingest into a failure.
         onAccepted: { [acceptedAppId] appId in
@@ -315,7 +325,7 @@ final class FacadeState: @unchecked Sendable {
         requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,
         batchSize: config.batchSize, piiScrubEnabled: config.piiScrubEnabled,
         attStatus: AdvertisingIdentity().status.rawValue),
-      store: store, clock: SystemClock(), scheduler: TimerScheduler(), uuid: uuid,
+      store: store, clock: SystemClock(), scheduler: scheduler, uuid: uuid,
       transport: eventTransport,
       onError: config.onError)
     let pipe = CommandPipe(engine: engine, onError: config.onError)
@@ -587,7 +597,8 @@ final class FacadeState: @unchecked Sendable {
     guard let (config, deviceId) = lookupTarget() else { return nil }
     return await resolveDeferredDeepLink(
       fetcher: HttpConversionFetcher(
-        endpoint: config.endpoint, apiKey: config.apiKey, deviceId: deviceId))
+        endpoint: config.endpoint, apiKey: config.apiKey, deviceId: deviceId,
+        environment: config.environment))
   }
 
   var currentDeviceId: String? {

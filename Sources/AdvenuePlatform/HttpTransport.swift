@@ -10,6 +10,8 @@ struct EventBatch: Encodable {
   /// The server compares it with its receive time to measure the clock offset,
   /// so it is stamped on every attempt and never persisted with the queue.
   let sentAt: String
+  /// Spec 2 §2.1: present only for sandbox; production omits it.
+  let environment: String?
 }
 
 public let DEFAULT_ENDPOINT = "https://ingest.advenue.io"
@@ -27,6 +29,8 @@ public struct HttpTransport: EventTransport, Sendable {
   private let signer: any Signer
   private let clock: any Clock
   private let session: URLSession
+  private let environment: AdvenueEnvironment
+  private let capability: SandboxCapability?
   /// Receives the app the server reported for an ACCEPTED batch. Purely
   /// diagnostic: it runs after the batch is already accepted, so nothing it
   /// does can turn a successful ingest into a failure.
@@ -39,6 +43,8 @@ public struct HttpTransport: EventTransport, Sendable {
     signer: any Signer = CryptoKitSigner(),
     clock: any Clock = SystemClock(),
     session: URLSession = .shared,
+    environment: AdvenueEnvironment = .production,
+    capability: SandboxCapability? = nil,
     onAccepted: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.onAccepted = onAccepted
@@ -48,6 +54,12 @@ public struct HttpTransport: EventTransport, Sendable {
     self.signer = signer
     self.clock = clock
     self.session = session
+    self.environment = environment
+    // One per transport, and the facade builds one transport per start: so
+    // the capability is asked once per process, before the first upload.
+    self.capability =
+      environment == .sandbox
+      ? (capability ?? SandboxCapability.http(endpoint: endpoint, session: session)) : nil
   }
 
   /// The exact request this transport would send. Public so a test can assert
@@ -59,7 +71,9 @@ public struct HttpTransport: EventTransport, Sendable {
     let nowMs = clock.nowMs()
     let body = try EventEncoding.canonicalEncoder()
       .encode(
-        EventBatch(apiKey: apiKey, events: events, sentAt: EventEncoding.iso8601(ms: nowMs)))
+        EventBatch(
+          apiKey: apiKey, events: events, sentAt: EventEncoding.iso8601(ms: nowMs),
+          environment: environment == .sandbox ? AdvenueEnvironment.sandbox.rawValue : nil))
     var request = URLRequest(url: URL(string: "\(endpoint)/v1/events")!)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -79,6 +93,10 @@ public struct HttpTransport: EventTransport, Sendable {
   }
 
   public func send(_ events: [ClientEvent]) async throws {
+    if let capability {
+      let supported = try await capability.check()
+      if !supported { throw SandboxUnsupportedError(.capabilityMissing) }
+    }
     let request = try buildRequest(events)
     let response: URLResponse
     let payload: Data
@@ -90,17 +108,33 @@ public struct HttpTransport: EventTransport, Sendable {
       throw IngestError(status: 408, networkCause: describeNetworkFailure(error))
     }
     guard let http = response as? HTTPURLResponse else { throw IngestError(status: 408) }
-    guard (200..<300).contains(http.statusCode) else {
-      throw IngestError(status: http.statusCode)
-    }
-
-    // Diagnostics only — the batch is already accepted at this point, so a
-    // missing or unparseable body must change nothing.
-    if let body = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
-      let appId = body["appId"] as? String, !appId.isEmpty
+    // Diagnostics only: the batch is already accepted when an app id comes back.
+    if let appId = try Self.interpret(
+      status: http.statusCode, body: payload, environment: environment)
     {
       onAccepted(appId)
     }
+  }
+
+  /// The verdict on one response. Pure, so the sandbox rules are testable
+  /// without a network. Returns the app id the server resolved, if any.
+  static func interpret(status: Int, body: Data, environment: AdvenueEnvironment) throws -> String? {
+    let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+    guard (200..<300).contains(status) else {
+      if status == 429, json?["error"] as? String == "sandbox_quota_exceeded",
+        let reset = (json?["resetAtMs"] as? NSNumber)?.int64Value
+      {
+        throw IngestError(status: 429, quotaResetAtMs: reset)
+      }
+      throw IngestError(status: status)
+    }
+    // Second line of defence (spec 2 §7.2): a proxy can serve an old
+    // ingestion behind a new /health.
+    if environment == .sandbox, json?["environment"] as? String != "sandbox" {
+      throw SandboxUnsupportedError(.responseMismatch)
+    }
+    guard let appId = json?["appId"] as? String, !appId.isEmpty else { return nil }
+    return appId
   }
 }
 

@@ -11,12 +11,21 @@ public struct IngestError: Error, Equatable, Sendable, CustomStringConvertible {
   /// looking at the wrong end (F-SDK-10).
   public let networkCause: String?
 
-  public init(status: Int, networkCause: String? = nil) {
+  /// Set on `429 sandbox_quota_exceeded`: the epoch ms the sandbox quota
+  /// resets at. The engine waits until then instead of backing off.
+  public let quotaResetAtMs: Int64?
+
+  public init(status: Int, networkCause: String? = nil, quotaResetAtMs: Int64? = nil) {
     self.status = status
     self.networkCause = networkCause
+    self.quotaResetAtMs = quotaResetAtMs
   }
 
   public var description: String {
+    if let quotaResetAtMs {
+      return
+        "Advenue: sandbox limit reached for today; uploads resume at \(EventEncoding.iso8601(ms: quotaResetAtMs))."
+    }
     if let networkCause { return "IngestError: no response (network error: \(networkCause))" }
     return "IngestError(status: \(status))"
   }

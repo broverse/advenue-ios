@@ -45,3 +45,18 @@ func withDebugLogging(
   }
   return (logged, { sink.log($0) })
 }
+
+/// Spec 2 §7.2: in sandbox the SDK always says so — at start, and when the
+/// server refuses sandbox or the daily quota is spent — whatever `debug` says.
+func withSandboxNotices(_ config: AdvenueConfig, sink: (any AdvenueLogSink)?) -> AdvenueConfig {
+  guard config.environment == .sandbox else { return config }
+  let out = sink ?? UnifiedLogSink()
+  out.log(SANDBOX_WARNING)
+  var wrapped = config
+  let report = config.onError
+  wrapped.onError = { context, error in
+    if context.hasPrefix("flush.sandbox_") { out.log("\(error)") }
+    report(context, error)
+  }
+  return wrapped
+}

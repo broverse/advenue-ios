@@ -3,6 +3,19 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
+## 1.4.0
+
+- **`environment: .sandbox`.** Test traffic goes to a separate sandbox store
+  (dashboard sandbox view, deleted after 14 days, capped at 10,000 events per
+  app per UTC day) and never reaches reports, postbacks, Meta CAPI or billing.
+  Read-only after `initialize`; a warning is logged at every sandbox start.
+- Before its first upload a sandbox SDK checks the server's `/health` for the
+  `sandbox` capability and never uploads to a server without it (self-hosters:
+  the server must run the release that ships Spec 2's ingestion changes).
+- Switching environments between launches drops the queued events of the old
+  environment and records a new install; device and installation ids are kept.
+- Production batches are byte-identical to 1.3.0.
+
 ## 1.3.0 (2026-10-12)
 
 - **`attStatus` on every event.** The ATT status (`authorized` / `denied` /

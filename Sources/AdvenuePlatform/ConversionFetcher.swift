@@ -11,13 +11,16 @@ public struct HttpConversionFetcher: ConversionFetcher {
   private let apiKey: String
   private let deviceId: String
   private let session: URLSession
+  private let environment: AdvenueEnvironment
 
   public init(
     endpoint: String = DEFAULT_API_ENDPOINT,
     apiKey: String,
     deviceId: String,
+    environment: AdvenueEnvironment = .production,
     session: URLSession = .shared
   ) {
+    self.environment = environment
     self.endpoint = endpoint
     self.apiKey = apiKey
     self.deviceId = deviceId
@@ -32,8 +35,10 @@ public struct HttpConversionFetcher: ConversionFetcher {
   func buildRequest() -> URLRequest {
     let escaped =
       deviceId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? deviceId
+    let sandbox = environment == .sandbox ? "&environment=sandbox" : ""
     var request = URLRequest(
-      url: URL(string: "\(endpoint)/sdk/conversion-data?deviceId=\(escaped)&platform=ios")!)
+      url: URL(
+        string: "\(endpoint)/sdk/conversion-data?deviceId=\(escaped)&platform=ios\(sandbox)")!)
     request.httpMethod = "GET"
     request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
     request.timeoutInterval = 15

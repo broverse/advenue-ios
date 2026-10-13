@@ -110,6 +110,7 @@ public actor AdvenueEngine {
   private var flushing = false
   private var consecutiveFailures = 0
   private var backoffUntilMs: Int64 = 0
+  private var uploadsDisabled = false
 
   public init(
     config: EngineConfig,
@@ -509,7 +510,7 @@ public actor AdvenueEngine {
     // sub-session's last activity fresh even when the app records nothing.
     if !forgotten { sessions.heartbeat() }
     guard let transport else { return }
-    if flushing || queue.size == 0 || clock.nowMs() < backoffUntilMs || heldForInstall() {
+    if flushing || uploadsDisabled || queue.size == 0 || clock.nowMs() < backoffUntilMs || heldForInstall() {
       return
     }
     flushing = true
@@ -526,7 +527,16 @@ public actor AdvenueEngine {
     do {
       try await transport.send(events)
     } catch {
-      if let ingest = error as? IngestError, !ingest.isRetryable {
+      if error is SandboxUnsupportedError {
+        // Spec 2 §7.2 (P3): never upload to a server that would file sandbox
+        // events as production. Kept on the device for the rest of the process.
+        uploadsDisabled = true
+        onError("flush.sandbox_unsupported", error)
+      } else if let ingest = error as? IngestError, let resetAt = ingest.quotaResetAtMs {
+        // Spec 2 §7.2: the daily sandbox quota resets at a known instant.
+        backoffUntilMs = resetAt
+        onError("flush.sandbox_quota", error)
+      } else if let ingest = error as? IngestError, !ingest.isRetryable {
         // Poison payload. Ingest parses a batch as a whole and answers one 400
         // for all of it, so the offender has to be found rather than the batch
         // discarded. A 4xx is not an outage, so it does not arm the backoff.
@@ -556,6 +566,10 @@ public actor AdvenueEngine {
         try await transport.send([event])
         queue.ack([event])
       } catch {
+        if error is SandboxUnsupportedError {
+          uploadsDisabled = true
+          return
+        }
         guard let ingest = error as? IngestError, !ingest.isRetryable else { return }
         queue.ack([event])
         onDrop([event])
@@ -573,6 +587,9 @@ public actor AdvenueEngine {
 
   /// Test surface: the `flush/` vectors assert that a 4xx leaves this at zero.
   public func consecutiveFailureCount() -> Int { consecutiveFailures }
+
+  /// Test surface: whether a sandbox capability failure stopped uploads.
+  public func uploadsAreDisabled() -> Bool { uploadsDisabled }
 }
 
 /// A command submitted to the engine through the ordered ingress.

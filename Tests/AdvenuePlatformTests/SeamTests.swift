@@ -87,6 +87,7 @@ final class SeamTests: XCTestCase {
   private static func clearPersistedState() {
     let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
     defaults?.removeObject(forKey: INSTALL_SENT_KEY)
+    defaults?.removeObject(forKey: ENVIRONMENT_KEY)
     // Session state too: a case that backgrounds leaves a closed session behind,
     // and the next case's first foreground then reports the gap and emits a
     // session_end for it — a session boundary from the previous test.
@@ -452,6 +453,26 @@ final class SeamTests: XCTestCase {
     try await Self.until(timeout: 5) { await !transport.seen.isEmpty }
     let names = await transport.seen.flatMap { $0 }
     XCTAssertFalse(names.contains("session_end"), "a background launch has no session to end")
+  }
+
+  /// Spec 2 §7.2: the sandbox warning is logged even with debug off.
+  func testSandboxLogsItsWarningWithoutDebug() async throws {
+    let sink = RecordingLogSink()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink)
+    XCTAssertTrue(sink.lines.contains(SANDBOX_WARNING), "\(sink.lines)")
+  }
+
+  /// Production stays silent, as before.
+  func testProductionLogsNoSandboxWarning() async throws {
+    let sink = RecordingLogSink()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink)
+    XCTAssertFalse(sink.lines.contains(SANDBOX_WARNING))
   }
 
   /// `debug` is the integrator's window into an SDK that otherwise swallows
