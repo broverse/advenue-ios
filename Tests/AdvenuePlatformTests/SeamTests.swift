@@ -87,6 +87,67 @@ actor GatedTransport: EventTransport {
   }
 }
 
+/// GatedTransport that also keeps every batch it was handed, the held one
+/// included, so a test can say what was sent after the gate.
+actor GatedRecordingTransport: EventTransport {
+  private(set) var batches: [[ClientEvent]] = []
+  private var released = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  var sends: Int { batches.count }
+  var events: [ClientEvent] { batches.flatMap { $0 } }
+  func send(_ events: [ClientEvent]) async throws {
+    batches.append(events)
+    if released || batches.count > 1 { return }
+    await withCheckedContinuation { waiter = $0 }
+  }
+  func release() {
+    released = true
+    waiter?.resume()
+    waiter = nil
+  }
+}
+
+/// An in-memory secure store whose reads can be made to fail the way a locked
+/// Keychain does, so a test can defer identity on demand.
+final class ScriptedSecureStore: SecureStore, @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [String: String] = [:]
+  private var unreadable = false
+  func makeUnreadable() {
+    lock.lock()
+    unreadable = true
+    lock.unlock()
+  }
+  func value(_ key: String) -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return values[key]
+  }
+  func read(_ key: String) -> SecureReadResult {
+    lock.lock()
+    defer { lock.unlock() }
+    if unreadable { return .unavailable }
+    return values[key].map { .found($0) } ?? .absent
+  }
+  func write(_ value: String, forKey key: String) {
+    lock.lock()
+    values[key] = value
+    lock.unlock()
+  }
+  func delete(_ key: String) {
+    lock.lock()
+    values.removeValue(forKey: key)
+    lock.unlock()
+  }
+}
+
+/// Answers the deferred-deep-link lookup at once, and remembers who asked.
+final class StubConversionFetcher: ConversionFetcher, @unchecked Sendable {
+  let result: ConversionResult
+  init(_ result: ConversionResult) { self.result = result }
+  func fetch() async throws -> ConversionResult { result }
+}
+
 /// Records what resetInstall asked the server to clear; can answer like an old server.
 actor RecordingDeviceReset: SandboxDeviceResetting {
   struct Call: Sendable, Equatable {
@@ -991,13 +1052,252 @@ final class SeamTests: XCTestCase {
 
   private func startGatedSandbox(
     _ state: FacadeState, gate: GatedDeviceReset, transport: (any EventTransport)? = nil,
-    sink: RecordingLogSink? = nil
+    sink: RecordingLogSink? = nil, secure: (any SecureStore)? = nil
   ) {
     var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
     config.flushIntervalMs = 0
     state.start(
       config, transport: transport ?? RecordingTransport(), sources: Self.settledSources,
-      logSink: sink, deviceReset: gate)
+      logSink: sink, deviceReset: gate, secureStore: secure)
+  }
+
+  /// Starts a sandbox SDK whose first send the transport holds, then begins a
+  /// reset: on return the pipe is detached and the drain waits behind that
+  /// send until `transport.release()`.
+  private func startResetInTheDrain(
+    _ state: FacadeState, transport: GatedRecordingTransport, sink: RecordingLogSink? = nil,
+    secure: (any SecureStore)? = nil
+  ) async throws -> Task<String?, Never> {
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate, transport: transport, sink: sink, secure: secure)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+    try await Self.until(timeout: 5, state: state) { await transport.sends == 1 }
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { !state.isRunning }
+    return reset
+  }
+
+  /// K1: forgetMe while the reset drains. The erasure cannot go onto a pipe,
+  /// so the reset performs it: the device id, installation id, consent and
+  /// user id are all gone, nothing restarts, and no install is sent after.
+  func testForgetMeDuringTheDrainErasesEverythingAndSendsNoInstall() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.rememberConsent(true)
+    state.submit(.setConsent(true))
+    state.submit(.setUserId("user-1"))
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+    try await Self.until(timeout: 5, state: state) { await transport.sends == 1 }
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { !state.isRunning }
+
+    // Buffered for the next pipe, then erased with everything else.
+    state.submit(.setUserId("user-2"))
+    state.forgetMe()
+    await transport.release()
+    let result = await reset.value
+
+    XCTAssertNil(result, "the reset restarted an erased SDK")
+    XCTAssertFalse(state.isRunning)
+    let defaults = UserDefaultsStore()
+    XCTAssertNil(defaults.string(forKey: CONSENT_KEY), "consent")
+    XCTAssertNil(defaults.string(forKey: USER_ID_KEY), "user_id")
+    XCTAssertNil(defaults.string(forKey: INSTALLATION_ID_KEY), "installation_id")
+    XCTAssertNil(defaults.string(forKey: INSTALL_SENT_KEY), "install_sent")
+    XCTAssertEqual(KeychainStore().read(DEVICE_ID_KEY), .absent, "device_id")
+    XCTAssertFalse(state.trackingConsent)
+    try await Task.sleep(nanoseconds: 300_000_000)
+    let later = await transport.batches.dropFirst().flatMap { $0 }
+    XCTAssertFalse(later.contains { $0.type == "install" }, "an install was sent after forgetMe")
+  }
+
+  /// K2: the drain keeps one of each setting, in the order of the last write.
+  func testTheDrainKeepsOnlyTheLastOfEachSetting() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    defer {
+      let defaults = UserDefaultsStore()
+      defaults.removeObject(forKey: CONSENT_KEY)
+      defaults.removeObject(forKey: CONSENT_DATA_KEY)
+      defaults.removeObject(forKey: USER_ID_KEY)
+    }
+    let reset = try await startResetInTheDrain(state, transport: transport)
+
+    state.submit(.setUserId("u1"))
+    state.submit(.setConsent(true))
+    state.submit(.setUserId("u2"))
+    state.submit(.setConsentData(Consent(isUserSubjectToGDPR: true)))
+    state.submit(.setConsent(false))
+    for index in 0..<50 { state.submit(.setUserId("bulk-\(index)")) }
+    state.submit(.setUserId("u3"))
+    XCTAssertEqual(state.resetBufferKinds, ["setConsentData", "setConsent", "setUserId"])
+
+    await transport.release()
+    let result = await reset.value
+    _ = try XCTUnwrap(result)
+    try await Self.until(timeout: 5) {
+      let defaults = UserDefaultsStore()
+      return defaults.string(forKey: CONSENT_KEY) == "denied"
+        && defaults.string(forKey: USER_ID_KEY) == "u3"
+        && defaults.string(forKey: CONSENT_DATA_KEY) != nil
+    }
+  }
+
+  /// K3: the restart defers identity, so no pipe takes what the drain
+  /// buffered. It goes to the store instead, where the next start loads it.
+  func testWhatTheDrainBufferedReachesTheStoreWhenTheRestartDefers() async throws {
+    let transport = GatedRecordingTransport()
+    let secure = ScriptedSecureStore()
+    let state = newState()
+    defer {
+      let defaults = UserDefaultsStore()
+      defaults.removeObject(forKey: CONSENT_KEY)
+      defaults.removeObject(forKey: USER_ID_KEY)
+    }
+    state.submit(.setConsent(true))
+    let reset = try await startResetInTheDrain(state, transport: transport, secure: secure)
+
+    state.submit(.setConsent(false))
+    state.submit(.setUserId("user-k3"))
+    secure.makeUnreadable()
+    await transport.release()
+    _ = await reset.value
+
+    XCTAssertFalse(state.isRunning, "precondition: the restart deferred")
+    let defaults = UserDefaultsStore()
+    XCTAssertEqual(defaults.string(forKey: CONSENT_KEY), "denied")
+    XCTAssertEqual(defaults.string(forKey: USER_ID_KEY), "user-k3")
+  }
+
+  /// K4: a re-initialize during the drain owns the store from then on. The old
+  /// engine's reset still runs when the drain reaches it, but must not wipe the
+  /// new instance's install flag.
+  func testReinitializeDuringTheDrainKeepsTheNewInstancesStore() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    let reset = try await startResetInTheDrain(state, transport: transport)
+    XCTAssertEqual(UserDefaultsStore().string(forKey: INSTALL_SENT_KEY), "1", "precondition")
+
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate)
+    await transport.release()
+    let result = await reset.value
+
+    XCTAssertNil(result)
+    XCTAssertTrue(state.isRunning, "the re-initialized SDK was torn down")
+    XCTAssertEqual(
+      UserDefaultsStore().string(forKey: INSTALL_SENT_KEY), "1",
+      "the old engine's reset wiped the new instance's install flag")
+  }
+
+  /// K5: the restart claims the SDK under the same lock that starts it. A
+  /// restart whose generation has moved (a stop got in first) changes nothing:
+  /// the SDK stays stopped and the identity is not rotated.
+  func testARestartWhoseGenerationMovedDoesNotRevive() async throws {
+    let secure = ScriptedSecureStore()
+    let state = newState()
+    let gate = GatedDeviceReset()
+    startGatedSandbox(state, gate: gate, secure: secure)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = secure.value(DEVICE_ID_KEY)
+    state.stop()
+
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    let claimed = state.start(
+      config, transport: RecordingTransport(), sources: Self.settledSources,
+      deviceReset: gate, secureStore: secure,
+      resetPlan: ResetPlan(expected: -1, mintedDeviceId: "minted"))
+
+    XCTAssertFalse(claimed)
+    XCTAssertFalse(state.isRunning, "a stopped SDK was revived")
+    XCTAssertEqual(secure.value(DEVICE_ID_KEY), old, "the identity rotated anyway")
+  }
+
+  /// K7: a deep link that arrives while the reset drains is not dropped; the
+  /// restart replays it, so it belongs to the new install.
+  func testADeepLinkDuringTheDrainReachesTheNewInstall() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    let reset = try await startResetInTheDrain(state, transport: transport)
+
+    state.deepLink(try XCTUnwrap(URL(string: "https://example.com/promo")))
+    XCTAssertEqual(state.bufferedDeepLinkCount, 1)
+    await transport.release()
+    let result = await reset.value
+    let new = try XCTUnwrap(result)
+
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "deep_link" && $0.deviceId == new }
+    }
+    XCTAssertEqual(state.bufferedDeepLinkCount, 0)
+  }
+
+  /// K8: the restart defers identity (the Keychain cannot be read), but the
+  /// reset is done and the new id is the device's: it is returned, not nil.
+  func testAResetWhoseRestartDefersIdentityReturnsTheNewId() async throws {
+    let secure = ScriptedSecureStore()
+    let state = newState()
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate, secure: secure)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = state.currentDeviceId
+    secure.makeUnreadable()
+
+    let new = await state.resetInstall()
+
+    XCTAssertNotNil(new)
+    XCTAssertNotEqual(new, old)
+    XCTAssertEqual(new, secure.value(DEVICE_ID_KEY))
+    XCTAssertFalse(state.isRunning, "precondition: the restart deferred")
+  }
+
+  /// K9: a second call while the first is draining is "already running", not
+  /// "not running".
+  func testACallDuringTheDrainSaysBusy() async throws {
+    let transport = GatedRecordingTransport()
+    let sink = RecordingLogSink()
+    let state = newState()
+    let reset = try await startResetInTheDrain(state, transport: transport, sink: sink)
+
+    let second = await state.resetInstall()
+    await transport.release()
+    _ = await reset.value
+
+    XCTAssertNil(second)
+    XCTAssertTrue(sink.lines.contains(RESET_INSTALL_BUSY_LOG), "\(sink.lines)")
+    XCTAssertFalse(sink.lines.contains(RESET_INSTALL_NOT_RUNNING_LOG), "\(sink.lines)")
+  }
+
+  /// K17: resolveDeferredDeepLink asks the server for this device, with the
+  /// config the SDK was started with. It returned nil without asking anyone:
+  /// the config it read was never recorded.
+  func testResolveDeferredDeepLinkAsksForThisDevice() async throws {
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: RecordingTransport(), sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let deviceId = try XCTUnwrap(state.currentDeviceId)
+    let asked = ErrorContexts()
+
+    let link = await state.fetchDeferredDeepLink(
+      makeFetcher: { started, id in
+        asked.add("\(started.apiKey)|\(id)")
+        return StubConversionFetcher(.resolved(DeepLink(deepLinkValue: "promo")))
+      },
+      sleep: { _ in })
+
+    XCTAssertEqual(asked.all, ["apk_live_x|\(deviceId)"])
+    XCTAssertEqual(link?.deepLinkValue, "promo")
   }
 
   /// I1: `shutdown()` while the server call is out. The reset must not revive

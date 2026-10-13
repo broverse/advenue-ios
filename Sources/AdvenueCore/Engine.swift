@@ -333,7 +333,7 @@ public actor AdvenueEngine {
 
   public func setConsent(_ granted: Bool) {
     consent = granted
-    store.set(granted ? "granted" : "denied", forKey: CONSENT_KEY)
+    persistConsent(granted, to: store)
 
     // Granting consent releases an install that was refused for the lack of it.
     guard granted, let deferred = installDeferred else { return }
@@ -349,13 +349,7 @@ public actor AdvenueEngine {
   public func setConsentData(_ consent: Consent?) {
     guard !forgotten else { return }
     consentData = consent
-    guard let consent else {
-      store.removeObject(forKey: CONSENT_DATA_KEY)
-      return
-    }
-    if let data = try? EventEncoding.canonicalEncoder().encode(consent) {
-      store.set(String(decoding: data, as: UTF8.self), forKey: CONSENT_DATA_KEY)
-    }
+    persistConsentData(consent, to: store)
   }
 
   public func getConsentData() -> Consent? { consentData }
@@ -404,8 +398,13 @@ public actor AdvenueEngine {
     do {
       try await reporter.update(
         fine: update.fineValue, coarse: update.coarseValue, lockWindow: update.lockWindow)
+      // K10: the await above lets other commands run. A reset or erasure that
+      // landed meanwhile has finished this installation; its state key is gone
+      // (or going), and confirming would write it back.
+      guard !forgotten else { return }
       skan.confirm(update)
     } catch {
+      guard !forgotten else { return }
       skan.abandon(update)
       onError("skan.update", error)
     }
@@ -448,11 +447,7 @@ public actor AdvenueEngine {
       return
     }
     customerUserId = id
-    if let id {
-      store.set(id, forKey: USER_ID_KEY)
-    } else {
-      store.removeObject(forKey: USER_ID_KEY)
-    }
+    persistUserId(id, to: store)
   }
 
   /// Erasure. NOTE: this clears only what lives in the `KeyValueStore`. The
@@ -480,9 +475,15 @@ public actor AdvenueEngine {
   /// erasure: consent and the customer user id stay. Ordered on the pipe, so a
   /// command queued before it cannot write the old queue back afterwards; the
   /// engine then refuses further work and the facade starts a fresh one.
-  public func resetInstallState() {
+  ///
+  /// `stillOwned` is asked on this engine's own thread, at the moment the reset
+  /// runs. False means the SDK changed hands while this engine drained (a stop,
+  /// a re-initialize, forgetMe): the engine still stops working, but the store
+  /// now belongs to whoever replaced it, so nothing in it is touched.
+  public func resetInstallState(stillOwned: @Sendable () -> Bool = { true }) {
     forgotten = true
     releaseInstallHold()
+    guard stillOwned() else { return }
     queue.clear()
     sessions.reset()
     // QUEUE_KEY last, for the reason `forgetMe` gives.
@@ -619,8 +620,9 @@ public enum Command: Sendable {
   case setConsent(Bool)
   case setUserId(String?)
   case forgetMe
-  /// Sandbox only: the local half of `resetInstall()`.
-  case resetInstall
+  /// Sandbox only: the local half of `resetInstall()`. `stillOwned` says, when
+  /// it runs, whether the reset still owns the SDK (see `resetInstallState`).
+  case resetInstall(stillOwned: @Sendable () -> Bool)
   case foreground
   case background
   case flush
@@ -690,8 +692,8 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setUserId(id)
     case .forgetMe:
       await engine.forgetMe()
-    case .resetInstall:
-      await engine.resetInstallState()
+    case .resetInstall(let stillOwned):
+      await engine.resetInstallState(stillOwned: stillOwned)
     case .foreground:
       await engine.notifyForeground()
     case .background:
@@ -747,6 +749,45 @@ public final class CommandPipe: @unchecked Sendable {
     continuation.finish()
     consumer = nil
     await task?.value
+  }
+}
+
+func persistConsent(_ granted: Bool, to store: KeyValueStore) {
+  store.set(granted ? "granted" : "denied", forKey: CONSENT_KEY)
+}
+
+func persistConsentData(_ consent: Consent?, to store: KeyValueStore) {
+  guard let consent else {
+    store.removeObject(forKey: CONSENT_DATA_KEY)
+    return
+  }
+  if let data = try? EventEncoding.canonicalEncoder().encode(consent) {
+    store.set(String(decoding: data, as: UTF8.self), forKey: CONSENT_DATA_KEY)
+  }
+}
+
+func persistUserId(_ id: String?, to store: KeyValueStore) {
+  if let id {
+    store.set(id, forKey: USER_ID_KEY)
+  } else {
+    store.removeObject(forKey: USER_ID_KEY)
+  }
+}
+
+/// K3: what a setConsent, setConsentData or setUserId command would have
+/// persisted, written straight to the store, for a command with no engine left
+/// to run it (a reset whose restart did not happen). The same keys, encodings
+/// and length rule the engine uses, so the next start loads it as if it had run.
+/// Any other command is ignored.
+public func persistSettingCommand(_ command: Command, to store: KeyValueStore) {
+  switch command {
+  case .setConsent(let granted): persistConsent(granted, to: store)
+  case .setConsentData(let consent): persistConsentData(consent, to: store)
+  case .setUserId(let id):
+    // The engine refuses an over-long id without persisting it.
+    if let id, id.count > 128 { return }
+    persistUserId(id, to: store)
+  default: break
   }
 }
 

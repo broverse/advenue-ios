@@ -180,6 +180,13 @@ let RESET_INSTALL_NOT_RUNNING_LOG =
 /// A second call while one is in flight.
 let RESET_INSTALL_BUSY_LOG = "Advenue: resetInstall() is already running; this call did nothing."
 
+/// `resetInstall`'s restart: start only if the SDK is still at `expected`,
+/// and give the device `mintedDeviceId`.
+struct ResetPlan {
+  let expected: Int
+  let mintedDeviceId: String
+}
+
 /// Thread-safe holder for the app the server reported. Diagnostics only.
 final class AcceptedAppId: @unchecked Sendable {
   private let lock = NSLock()
@@ -243,8 +250,9 @@ final class FacadeState: @unchecked Sendable {
   /// value it just replaced.
   private var consentMirror = false
   private var consentDataMirror: Consent?
-  /// What `resetInstall` needs to start again exactly as the app did.
-  private var restart: (() -> Void)?
+  /// What `resetInstall` needs to start again exactly as the app did. Returns
+  /// whether the plan was claimed (see `start`'s `resetPlan`).
+  private var restart: ((ResetPlan) -> Bool)?
   private var requestedConfig: AdvenueConfig?
   private var deviceReset: (any SandboxDeviceResetting)?
   private var noticeSink: (any AdvenueLogSink)?
@@ -261,15 +269,29 @@ final class FacadeState: @unchecked Sendable {
   /// the next pipe `start` builds (the restart, or a re-initialize); without
   /// it they would be dropped, and the restart would reseed the consent
   /// mirror from the store the drain began with.
+  ///
+  /// K2: at most one of each, kept in the order of their last write: only the
+  /// final value of each setting matters, and a buffer that grows with every
+  /// call is a leak with a long drain behind it.
   private var resetBuffer: [Command]?
+  /// K1: forgetMe while the pipe was detached for a reset's drain. The erasure
+  /// could not go onto a pipe, so it waits here: the next `start` performs it on
+  /// its new pipe, or the reset, finding nobody started, wipes the store itself.
+  private var resetErasure = false
 
   init(fallbackSink: (any AdvenueLogSink)? = nil) {
     self.fallbackSink = fallbackSink
   }
 
+  /// `resetPlan` is `resetInstall`'s restart: start only if the generation is
+  /// still the one the reset began on, and rotate the install identity in the
+  /// same critical section. Returns false when it was not claimed (nothing was
+  /// changed); every other start returns true.
+  ///
   /// `transport` is a parameter, not a hidden construction, because an unwired
   /// transport is otherwise invisible: every component of the send path can be
   /// green while nothing joins them. `SeamTests` injects a recorder here.
+  @discardableResult
   func start(
     _ config: AdvenueConfig,
     transport: (any EventTransport)? = nil,
@@ -279,23 +301,44 @@ final class FacadeState: @unchecked Sendable {
     launchedInBackground: @escaping () -> Bool = readLaunchedInBackground,
     logSink: (any AdvenueLogSink)? = nil,
     advertisingSource: (@Sendable () -> AdvertisingSnapshot)? = nil,
-    deviceReset: (any SandboxDeviceResetting)? = nil
-  ) {
-    // Replace-and-shut-down, never add.
-    stop()
-
+    deviceReset: (any SandboxDeviceResetting)? = nil,
+    secureStore: (any SecureStore)? = nil,
+    resetPlan: ResetPlan? = nil
+  ) -> Bool {
     // `resetInstall` restarts with exactly these arguments, so a reset app
     // runs with the same transport, sources and sinks it was started with.
     let requestedConfig = config
-    let restartArgs: () -> Void = { [weak self] in
+    let restartArgs: (ResetPlan) -> Bool = { [weak self] plan in
       self?.start(
         requestedConfig, transport: transport, sources: sources, skan: skanReporter,
         appVersion: readVersion, launchedInBackground: launchedInBackground, logSink: logSink,
-        advertisingSource: advertisingSource, deviceReset: deviceReset)
+        advertisingSource: advertisingSource, deviceReset: deviceReset,
+        secureStore: secureStore, resetPlan: plan) ?? false
     }
+    let secure: any SecureStore = secureStore ?? KeychainStore()
+
+    // Replace-and-shut-down, never add: the same steps as `stop()`, in the
+    // same critical section as what follows.
+    lock.lock()
+    if let plan = resetPlan {
+      // K5: a reset's restart claims the SDK here, under the lock that also
+      // stops it, so a shutdown() or re-initialize can land only wholly
+      // before (nothing restarts, the identity is kept) or wholly after (it
+      // stops the new instance). The identity rotates only once claimed.
+      guard generation == plan.expected, let oldStore = self.store, let oldSecure = self.secure
+      else {
+        lock.unlock()
+        return false
+      }
+      rotateInstallIdentity(
+        store: oldStore, secure: oldSecure, mintedDeviceId: plan.mintedDeviceId)
+      resolvedDeviceId = nil
+    }
+    generation += 1
+    let ownGeneration = generation
+    let replaced = detachLocked()
     // Recorded before the identity gate, so a reset on a deferred launch
     // still knows the environment it was asked for (and says so).
-    lock.lock()
     self.restart = restartArgs
     self.requestedConfig = requestedConfig
     self.noticeSink = logSink
@@ -305,6 +348,8 @@ final class FacadeState: @unchecked Sendable {
         endpoint: requestedConfig.endpoint, apiKey: requestedConfig.apiKey,
         signingSecret: requestedConfig.signingSecret)
     lock.unlock()
+    replaced.cancel()
+    replaced.pipe?.shutdown()
 
     // `debug`: every swallowed failure goes through onError, so logging there
     // covers all of them — wrapped once, before anything below captures it.
@@ -342,7 +387,6 @@ final class FacadeState: @unchecked Sendable {
     if let dropped = reconcileEnvironment(config.environment, store: store, scheduler: scheduler) {
       logEnvironmentChange(dropped: dropped, to: config.environment, log: log)
     }
-    let secure = KeychainStore()
     let uuid = SystemUUIDs()
 
     let identity = resolveIdentity(secure: secure, store: store, uuid: uuid)
@@ -351,7 +395,7 @@ final class FacadeState: @unchecked Sendable {
       // nothing starts, so no event carries an invented identifier. The next
       // launch after first unlock resolves it.
       config.onError("identity.deferred", AdvenueSetupError.identityDeferred)
-      return
+      return true
     }
 
     let osVersion: String?
@@ -435,6 +479,13 @@ final class FacadeState: @unchecked Sendable {
     }
 
     lock.lock()
+    // K5: stopped or replaced while this start ran: the instance that replaced
+    // it owns the SDK, and this one must not come alive behind it.
+    guard generation == ownGeneration else {
+      lock.unlock()
+      pipe.shutdown()
+      return true
+    }
     self.store = store
     self.secure = secure
     if let advertisingSource { self.advertisingSource = advertisingSource }
@@ -443,6 +494,19 @@ final class FacadeState: @unchecked Sendable {
     self.consentMirror = store.string(forKey: CONSENT_KEY) == "granted"
     self.consentDataMirror = readPersistedConsentData(store)
     self.pipe = pipe
+    self.startedConfig = config
+    // K1: an erasure asked for while a reset drained goes first, on this pipe,
+    // exactly as `forgetMe` would have done on a running SDK.
+    let erase = resetErasure
+    resetErasure = false
+    if erase {
+      pipe.submit(.forgetMe)
+      consentMirror = false
+      consentDataMirror = nil
+      secure.delete(DEVICE_ID_KEY)
+      store.removeObject(forKey: INSTALLATION_ID_KEY)
+      store.removeObject(forKey: INSTALL_SENT_KEY)
+    }
     // F13: what the app set while a reset drained, in order, ahead of the
     // install, and reflected in the getters the store just reseeded.
     let carried = resetBuffer ?? []
@@ -455,7 +519,7 @@ final class FacadeState: @unchecked Sendable {
       }
       pipe.submit(command)
     }
-    self.resolvedDeviceId = deviceId
+    self.resolvedDeviceId = erase ? nil : deviceId
     let buffered = pendingDeepLinks
     pendingDeepLinks = []
     lock.unlock()
@@ -544,6 +608,7 @@ final class FacadeState: @unchecked Sendable {
         log: log)
     }
     lock.unlock()
+    return true
   }
 
   private var currentAppInstanceIdProvider: (@Sendable () async -> String?)? {
@@ -552,17 +617,55 @@ final class FacadeState: @unchecked Sendable {
     return appInstanceIdProvider
   }
 
+  /// K15: the pipe is read and submitted to in ONE critical section, so a
+  /// command cannot be read against the old pipe and land on it after a reset
+  /// took it (behind `.resetInstall`, where the finished engine drops it).
+  /// `pipe.submit` is a non-blocking yield. What goes onto the pipe is worked
+  /// out first, outside the lock: the advertising source is app (or test)
+  /// code, and `resolveVendorId` takes the lock itself.
   func submit(_ command: Command) {
+    let commands = expand(command)
     lock.lock()
-    let pipe = self.pipe
-    let source = self.advertisingSource
+    defer { lock.unlock() }
     if pipe == nil, resetBuffer != nil, Self.survivesReset(command) {
-      resetBuffer?.append(command)
-      lock.unlock()
+      bufferForResetLocked(command)
       return
     }
-    lock.unlock()
     guard let pipe else { return }
+    for item in commands { pipe.submit(item) }
+  }
+
+  /// K2: one of each setting, in the order of their last write. The caller
+  /// holds `lock`.
+  private func bufferForResetLocked(_ command: Command) {
+    let kind = Self.settingKind(command)
+    resetBuffer?.removeAll { Self.settingKind($0) == kind }
+    resetBuffer?.append(command)
+  }
+
+  /// Test surface: what a reset's drain is holding for the next pipe.
+  var resetBufferKinds: [String]? {
+    lock.lock()
+    defer { lock.unlock() }
+    return resetBuffer?.map { command in
+      switch command {
+      case .setConsent: return "setConsent"
+      case .setConsentData: return "setConsentData"
+      case .setUserId: return "setUserId"
+      default: return "other"
+      }
+    }
+  }
+
+  private var currentAdvertisingSource: @Sendable () -> AdvertisingSnapshot {
+    lock.lock()
+    defer { lock.unlock() }
+    return advertisingSource
+  }
+
+  /// The commands one facade call puts on the pipe. Takes the lock (through
+  /// its helpers), so it is never called while holding it.
+  private func expand(_ command: Command) -> [Command] {
     switch command {
     case .flush, .foreground:
       // The MMPs read the advertising identity at send time, not at init:
@@ -573,33 +676,42 @@ final class FacadeState: @unchecked Sendable {
       // on the main thread; on platforms without ATT they return the same
       // nils init produced. `track` stays untouched: it is the hot path and
       // history is not rewritten.
-      let current = source()
-      pipe.submit(
+      let current = currentAdvertisingSource()
+      return [
         .setAdvertisingIdentity(
           idfa: current.idfa, vendorId: resolveVendorId(current.vendorId),
-          limitAdTracking: current.limitAdTracking, attStatus: current.attStatus?.rawValue))
-      pipe.submit(command)
+          limitAdTracking: current.limitAdTracking, attStatus: current.attStatus?.rawValue),
+        command,
+      ]
     case .setIdentity(let idfa, let vendorId, let appInstanceId, let limitAdTracking, let attStatus):
-      pipe.submit(
+      return [
         .setIdentity(
           idfa: idfa, vendorId: resolveVendorId(vendorId), appInstanceId: appInstanceId,
-          limitAdTracking: limitAdTracking, attStatus: attStatus))
+          limitAdTracking: limitAdTracking, attStatus: attStatus)
+      ]
     case .setAdvertisingIdentity(let idfa, let vendorId, let limitAdTracking, let attStatus):
-      pipe.submit(
+      return [
         .setAdvertisingIdentity(
           idfa: idfa, vendorId: resolveVendorId(vendorId), limitAdTracking: limitAdTracking,
-          attStatus: attStatus))
+          attStatus: attStatus)
+      ]
     default:
-      pipe.submit(command)
+      return [command]
     }
   }
 
   /// What `resetInstallState` keeps (consent and the customer user id), so
   /// what a reset's drain must not drop.
   private static func survivesReset(_ command: Command) -> Bool {
+    settingKind(command) != nil
+  }
+
+  private static func settingKind(_ command: Command) -> Int? {
     switch command {
-    case .setConsent, .setConsentData, .setUserId: return true
-    default: return false
+    case .setConsent: return 0
+    case .setConsentData: return 1
+    case .setUserId: return 2
+    default: return nil
     }
   }
 
@@ -616,8 +728,16 @@ final class FacadeState: @unchecked Sendable {
   /// only the engine's `forgetMe` is the layering trap the spec recorded — an
   /// erasure that leaves the identifier behind, and looks finished.
   func forgetMe() {
-    submit(.forgetMe)
     lock.lock()
+    if let pipe {
+      pipe.submit(.forgetMe)
+    } else if resetBuffer != nil {
+      // K1: a reset is draining with the pipe detached, so there is no pipe to
+      // put the erasure on. Recorded instead, and what was buffered for the
+      // next pipe is erased with it.
+      resetBuffer = []
+      resetErasure = true
+    }
     // F14: a reset waiting on the server must not restart an erased SDK under
     // a fresh identity.
     generation += 1
@@ -637,7 +757,7 @@ final class FacadeState: @unchecked Sendable {
   /// Everything `resetInstall` reads from this state, snapshotted at once.
   private struct ResetTarget {
     let config: AdvenueConfig
-    let restart: () -> Void
+    let restart: (ResetPlan) -> Bool
     let store: any KeyValueStore
     let secure: any SecureStore
     let deviceId: String
@@ -658,7 +778,9 @@ final class FacadeState: @unchecked Sendable {
   /// Synchronous for the reason `lookupTarget` is: NSLock is unavailable from
   /// an async context in Swift 6 mode (PF24). The environment is read first,
   /// so production logs its line even before `initialize` or while identity
-  /// is deferred. Accepting a reset claims `resetting` in the same critical
+  /// is deferred. A reset in flight is reported as busy before the running
+  /// check (K9): during its drain the pipe is detached, and "not running" would
+  /// misdescribe it. Accepting a reset claims `resetting` in the same critical
   /// section, so a double tap cannot start two.
   private func beginReset() -> ResetStart {
     lock.lock()
@@ -667,9 +789,9 @@ final class FacadeState: @unchecked Sendable {
     guard let config = requestedConfig, config.environment == .sandbox else {
       return .notSandbox(sink)
     }
+    guard !resetting else { return .alreadyRunning(sink) }
     guard pipe != nil, let restart, let store, let secure, let deviceId = resolvedDeviceId
     else { return .notRunning(sink) }
-    guard !resetting else { return .alreadyRunning(sink) }
     resetting = true
     return .ready(
       ResetTarget(
@@ -680,31 +802,38 @@ final class FacadeState: @unchecked Sendable {
   private func endReset() {
     lock.lock()
     resetting = false
-    resetBuffer = nil
     lock.unlock()
   }
 
-  /// A reset that gave up after detaching the pipe: what was buffered goes to
-  /// whatever pipe exists now (none, if the SDK was stopped).
-  private func releaseResetBuffer() {
+  /// Whether nobody stopped, re-initialized or erased since `expected`. Asked
+  /// by the draining engine (K4), never while holding `lock`.
+  private func owns(generation expected: Int) -> Bool {
     lock.lock()
-    let carried = resetBuffer ?? []
-    resetBuffer = nil
-    lock.unlock()
-    for command in carried { submit(command) }
+    defer { lock.unlock() }
+    return generation == expected
   }
 
   /// The local half's first step, atomically: the pipe is still the one the
   /// reset started on (no stop, no re-initialize while the server answered),
   /// `.resetInstall` goes onto THAT pipe behind every queued command, and the
   /// pipe is detached. Nil means the SDK changed hands: do nothing further.
+  ///
+  /// K7: no deep link is pending here. `deepLink` buffers only while no pipe
+  /// is live, and `start` empties the buffer in the critical section that
+  /// installs the pipe, so with a live pipe the buffer is empty. A link that
+  /// arrives during the drain is buffered and replayed by the next start, so
+  /// it reaches the new install.
   private func takePipeForReset(generation expected: Int) -> CommandPipe? {
     lock.lock()
     guard generation == expected, let pipe = self.pipe else {
       lock.unlock()
       return nil
     }
-    pipe.submit(.resetInstall)
+    // K4: the engine wipes the install keys only if the SDK is still the
+    // reset's when it gets there.
+    pipe.submit(.resetInstall(stillOwned: { [weak self] in
+      self?.owns(generation: expected) ?? false
+    }))
     let detached = detachLocked()
     resetBuffer = []
     lock.unlock()
@@ -712,38 +841,53 @@ final class FacadeState: @unchecked Sendable {
     return pipe
   }
 
-  /// After the drain: claims the restart only if nobody stopped or
-  /// re-initialized meanwhile, and forgets the in-memory identity with it.
-  /// (The restart itself runs `start`, which takes the lock, so it follows
-  /// this check rather than sitting inside it; no await separates them.)
-  private func claimRestart(generation expected: Int) -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    guard generation == expected else { return false }
-    pendingDeepLinks = []
-    resolvedDeviceId = nil
-    return true
-  }
-
-  /// The identity half of the local reset, once the engine has drained: the
-  /// next start mints a new device id and installation id. The old
-  /// installation's SKAN state goes too: it is keyed by that id, so nothing
-  /// would read it again, and a reset should not leave an orphan behind.
-  private func forgetInstallIdentity(store: any KeyValueStore, secure: any SecureStore) {
+  /// The identity half of the local reset, under `lock` inside the claiming
+  /// `start`: the installation id goes (the next start mints one) and the
+  /// device id is replaced by the one the reset minted (K8: the reset can
+  /// return it even if that start then defers). The old installation's SKAN
+  /// state goes too: it is keyed by that id, so nothing would read it again,
+  /// and a reset should not leave an orphan behind.
+  private func rotateInstallIdentity(
+    store: any KeyValueStore, secure: any SecureStore, mintedDeviceId: String
+  ) {
     if let installationId = store.string(forKey: INSTALLATION_ID_KEY) {
       store.removeObject(forKey: skanStateKey(installationId: installationId))
     }
     store.removeObject(forKey: INSTALLATION_ID_KEY)
-    secure.delete(DEVICE_ID_KEY)
+    secure.write(mintedDeviceId, forKey: DEVICE_ID_KEY)
+  }
+
+  /// After the restart (claimed or not): what the drain buffered and no start
+  /// took (a stop meanwhile, or a restart that deferred identity) is written
+  /// to the store, so the next start loads it (K3). An erasure recorded during
+  /// the drain and not performed by a start wipes the store first (K1). The
+  /// old engine has drained, so nothing writes behind this.
+  private func settleResetBuffer(store: any KeyValueStore, secure: any SecureStore) {
+    lock.lock()
+    defer { lock.unlock() }
+    let carried = resetBuffer ?? []
+    let erase = resetErasure
+    resetBuffer = nil
+    resetErasure = false
+    if erase {
+      for key in [
+        CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY, INSTALL_SENT_KEY,
+        INSTALLATION_ID_KEY, QUEUE_KEY,
+      ] {
+        store.removeObject(forKey: key)
+      }
+      secure.delete(DEVICE_ID_KEY)
+    }
+    for command in carried { persistSettingCommand(command, to: store) }
   }
 
   /// Spec 3 §7. See `Advenue.resetInstall()`.
   ///
   /// Outcomes: the new device id; or nil, with nothing changed locally, when
   /// not in the sandbox, not running, a reset is already in flight, or the SDK
-  /// was stopped or re-initialized while the server answered. If that happens
-  /// during the (short) local drain instead, the engine's reset has run but
-  /// the identity is kept and nothing restarts: a stopped SDK stays stopped.
+  /// was stopped, re-initialized or erased while the server answered or the
+  /// pipe drained. In that last case the old engine stops, but the store is
+  /// left to whoever owns the SDK now (K4), and the identity is kept.
   func resetInstall() async -> String? {
     let target: ResetTarget
     switch beginReset() {
@@ -776,14 +920,15 @@ final class FacadeState: @unchecked Sendable {
     // 2. Local: ordered behind every queued command, then wait for the pipe.
     guard let pipe = takePipeForReset(generation: target.generation) else { return nil }
     await pipe.shutdownAndWait()
-    guard claimRestart(generation: target.generation) else {
-      releaseResetBuffer()
-      return nil
-    }
-    forgetInstallIdentity(store: target.store, secure: target.secure)
-    // 3. A fresh start mints the ids and records the install.
-    target.restart()
-    return currentDeviceId
+    // 3. A fresh start claims the SDK, rotates the ids and records the install.
+    let minted = SystemUUIDs().next()
+    let claimed = target.restart(
+      ResetPlan(expected: target.generation, mintedDeviceId: minted))
+    settleResetBuffer(store: target.store, secure: target.secure)
+    guard claimed else { return nil }
+    // K8: the restart can defer identity (or be stopped right after the claim);
+    // the reset is still done, and the id it minted is the device's from now on.
+    return currentDeviceId ?? minted
   }
 
   /// Synchronous internally: NSLock cannot be held across an async boundary,
@@ -832,14 +977,24 @@ final class FacadeState: @unchecked Sendable {
   /// these modules into one — where the qualifier names nothing and dropping it
   /// would call this method again, forever. A distinct name removes the trap
   /// instead of relying on everyone remembering it.
-  func fetchDeferredDeepLink() async -> DeepLink? {
+  ///
+  /// `makeFetcher` is the seam the tests use; production builds the HTTP one
+  /// from the config this SDK was started with.
+  func fetchDeferredDeepLink(
+    makeFetcher: (AdvenueConfig, String) -> any ConversionFetcher = { config, deviceId in
+      HttpConversionFetcher(
+        endpoint: config.endpoint, apiKey: config.apiKey, deviceId: deviceId,
+        environment: config.environment)
+    },
+    sleep: @escaping @Sendable (Int) async -> Void = { ms in
+      try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+    }
+  ) async -> DeepLink? {
     // Snapshot synchronously first: NSLock cannot be held across an await, and
     // the same constraint shaped `currentDeviceId`.
     guard let (config, deviceId) = lookupTarget() else { return nil }
     return await resolveDeferredDeepLink(
-      fetcher: HttpConversionFetcher(
-        endpoint: config.endpoint, apiKey: config.apiKey, deviceId: deviceId,
-        environment: config.environment))
+      fetcher: makeFetcher(config, deviceId), sleep: sleep)
   }
 
   var currentDeviceId: String? {

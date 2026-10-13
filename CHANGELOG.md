@@ -18,6 +18,12 @@ stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 - `Advenue.resetInstall()` (sandbox only): a new install without reinstalling
   the app. Needs an ingestion server with `/v1/sandbox/reset-device`; an older
   server answers 404, which is logged, and the local reset still happens.
+  `forgetMe()` during a reset wins: the reset stops and the erasure covers the
+  device id, installation id, consent and user id. Consent, consent data and
+  the user id set while it runs are kept (the last of each), and a deep link
+  that arrives meanwhile is delivered to the new install.
+- Fixed: `Advenue.resolveDeferredDeepLink()` always returned nil without asking
+  the server. It now polls the conversion lookup for this device.
 
 ## 1.3.0 (2026-10-12)
 
