@@ -570,6 +570,12 @@ public actor AdvenueEngine {
           uploadsDisabled = true
           return
         }
+        if let ingest = error as? IngestError, let resetAt = ingest.quotaResetAtMs {
+          // Same as flush: the quota resets at a known instant; not a failure.
+          backoffUntilMs = resetAt
+          onError("flush.sandbox_quota", error)
+          return
+        }
         guard let ingest = error as? IngestError, !ingest.isRetryable else { return }
         queue.ack([event])
         onDrop([event])

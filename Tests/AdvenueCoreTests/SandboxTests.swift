@@ -109,4 +109,90 @@ final class SandboxTests: XCTestCase {
     XCTAssertEqual(reconcileEnvironment(.sandbox, store: store, scheduler: RecordingScheduler()), 0)
     XCTAssertNil(store.raw(INSTALL_SENT_KEY))
   }
+
+  // MARK: ordering and isolation (final review)
+
+  /// Records the order of writes and can "crash" on a chosen key.
+  private final class OrderedStore: KeyValueStore, @unchecked Sendable {
+    struct Crash: Error {}
+    let inner: MemoryStore
+    let crashOnSet: String?
+    private(set) var writes: [String] = []
+    private(set) var crashed = false
+    init(_ inner: MemoryStore, crashOnSet: String? = nil) {
+      self.inner = inner
+      self.crashOnSet = crashOnSet
+    }
+    func string(forKey key: String) -> String? { inner.string(forKey: key) }
+    func set(_ value: String, forKey key: String) {
+      if key == crashOnSet { crashed = true }  // the process dies here
+      if crashed { return }
+      writes.append("set:\(key)")
+      inner.set(value, forKey: key)
+    }
+    func removeObject(forKey key: String) {
+      if crashed { return }
+      writes.append("remove:\(key)")
+      inner.removeObject(forKey: key)
+    }
+  }
+
+  private static let oldQueue =
+    #"[{"deviceId":"d1","id":"e1","name":"x","platform":"ios","timestamp":"2026-01-01T00:00:00.000Z","type":"custom"}]"#
+
+  /// The new environment is recorded LAST: a kill before that leaves the old
+  /// record, so the next launch clears again instead of uploading the old
+  /// sandbox queue as production.
+  func testEnvironmentKeyIsWrittenLast() {
+    let inner = MemoryStore()
+    inner.preload(QUEUE_KEY, Self.oldQueue)
+    inner.preload(INSTALL_SENT_KEY, "1")
+    inner.preload(ENVIRONMENT_KEY, "sandbox")
+    let store = OrderedStore(inner)
+    _ = reconcileEnvironment(.production, store: store, scheduler: RecordingScheduler())
+    XCTAssertEqual(store.writes.last, "set:\(ENVIRONMENT_KEY)", "\(store.writes)")
+    XCTAssertTrue(store.writes.contains("remove:\(INSTALL_SENT_KEY)"))
+  }
+
+  func testCrashBeforeTheEnvironmentKeyLeavesNothingToUploadAsProduction() {
+    let inner = MemoryStore()
+    inner.preload(QUEUE_KEY, Self.oldQueue)
+    inner.preload(INSTALL_SENT_KEY, "1")
+    inner.preload(ENVIRONMENT_KEY, "sandbox")
+    let crashing = OrderedStore(inner, crashOnSet: ENVIRONMENT_KEY)
+    _ = reconcileEnvironment(.production, store: crashing, scheduler: RecordingScheduler())
+    XCTAssertTrue(crashing.crashed)
+    XCTAssertEqual(inner.raw(ENVIRONMENT_KEY), "sandbox", "old record stays, so the change is seen again")
+    XCTAssertEqual(inner.raw(QUEUE_KEY), "[]", "the old queue is already gone")
+    XCTAssertNil(inner.raw(INSTALL_SENT_KEY))
+    // Next launch: still a change, clears again, and records the key.
+    XCTAssertEqual(reconcileEnvironment(.production, store: inner, scheduler: RecordingScheduler()), 0)
+    XCTAssertEqual(inner.raw(ENVIRONMENT_KEY), "production")
+  }
+
+  /// Spec 2 §7.2: a spent quota seen while isolating a poison batch pauses
+  /// until resetAt and is not a failure, exactly as in flush.
+  func testQuotaDuringPoisonIsolationSetsBackoffWithoutCountingAFailure() async {
+    let clock = MutableClock()
+    clock.ms = 1_000_000
+    let transport = ErrorScriptTransport([
+      IngestError(status: 400), IngestError(status: 429, quotaResetAtMs: 5_000_000),
+    ])
+    let e = engine(MemoryStore(), clock, transport)
+    await e.track("a")
+    await e.track("b")
+    await e.flush()
+    var calls = await transport.calls
+    XCTAssertEqual(calls, 2)
+    let failures = await e.consecutiveFailureCount()
+    XCTAssertEqual(failures, 0)
+    clock.ms = 4_999_999
+    await e.flush()
+    calls = await transport.calls
+    XCTAssertEqual(calls, 2, "paused until resetAt")
+    clock.ms = 5_000_000
+    await e.flush()
+    calls = await transport.calls
+    XCTAssertGreaterThan(calls, 2)
+  }
 }

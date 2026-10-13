@@ -475,6 +475,23 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(sink.lines.contains(SANDBOX_WARNING))
   }
 
+  /// The "environment changed" line is a debug aid: silent with debug off.
+  func testEnvironmentChangeNoticeIsDebugGated() {
+    let off = RecordingLogSink()
+    let (_, silent) = withDebugLogging(
+      AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox), sink: off)
+    logEnvironmentChange(dropped: 3, to: .sandbox, log: silent)
+    XCTAssertTrue(off.lines.isEmpty, "\(off.lines)")
+
+    let on = RecordingLogSink()
+    let (_, loud) = withDebugLogging(
+      AdvenueConfig(apiKey: "apk_live_x", debug: true, environment: .sandbox), sink: on)
+    logEnvironmentChange(dropped: 3, to: .sandbox, log: loud)
+    XCTAssertTrue(
+      on.lines.contains { $0.contains("environment changed to sandbox") && $0.contains("3") },
+      "\(on.lines)")
+  }
+
   /// `debug` is the integrator's window into an SDK that otherwise swallows
   /// every failure: it logs the start, each swallowed failure (everything
   /// `onError` sees) and each accepted batch.

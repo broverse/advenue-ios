@@ -40,11 +40,20 @@ public func reconcileEnvironment(
 ) -> Int? {
   let previous =
     AdvenueEnvironment(rawValue: store.string(forKey: ENVIRONMENT_KEY) ?? "") ?? .production
-  store.set(current.rawValue, forKey: ENVIRONMENT_KEY)
-  guard previous != current else { return nil }
+  guard previous != current else {
+    // Pins the record for installs that had none, once the environment is known.
+    if store.string(forKey: ENVIRONMENT_KEY) == nil {
+      store.set(current.rawValue, forKey: ENVIRONMENT_KEY)
+    }
+    return nil
+  }
   let queue = EventQueue(store: store, scheduler: scheduler)
   let dropped = queue.size
   queue.clear()
   store.removeObject(forKey: INSTALL_SENT_KEY)
+  // LAST: a crash before this line leaves the old record, so the next launch
+  // sees the change again and clears again. Writing it first would let the
+  // old sandbox queue be uploaded as production.
+  store.set(current.rawValue, forKey: ENVIRONMENT_KEY)
   return dropped
 }

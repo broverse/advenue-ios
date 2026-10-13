@@ -278,9 +278,7 @@ final class FacadeState: @unchecked Sendable {
     // Spec 2 §7.2: a changed environment starts clean — before the engine
     // loads the queue and before the install flag is read below.
     if let dropped = reconcileEnvironment(config.environment, store: store, scheduler: scheduler) {
-      (logSink ?? UnifiedLogSink()).log(
-        "Advenue: environment changed to \(config.environment.rawValue); dropped \(dropped) queued event(s). A new install will be recorded."
-      )
+      logEnvironmentChange(dropped: dropped, to: config.environment, log: log)
     }
     let secure = KeychainStore()
     let uuid = SystemUUIDs()

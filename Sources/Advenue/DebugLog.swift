@@ -60,3 +60,14 @@ func withSandboxNotices(_ config: AdvenueConfig, sink: (any AdvenueLogSink)?) ->
   }
   return wrapped
 }
+
+/// The environment changed since the last launch and the old queue was dropped.
+/// `log` is the debug-gated log from `withDebugLogging`, so this is silent with
+/// debug off (the sandbox warning, by contrast, is always printed).
+func logEnvironmentChange(
+  dropped: Int, to environment: AdvenueEnvironment, log: @Sendable (String) -> Void
+) {
+  log(
+    "Advenue: environment changed to \(environment.rawValue); dropped \(dropped) queued event(s). A new install will be recorded."
+  )
+}
