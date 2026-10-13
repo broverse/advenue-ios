@@ -174,6 +174,11 @@ public enum Advenue {
 /// What `resetInstall()` logs, and all it does, outside the sandbox: a
 /// production app must not mint "new" installs.
 let RESET_INSTALL_PRODUCTION_LOG = "Advenue: resetInstall() works only in sandbox."
+/// Sandbox, but stopped or with the device identity not yet resolved.
+let RESET_INSTALL_NOT_RUNNING_LOG =
+  "Advenue: resetInstall() needs a started SDK with a resolved device identity; nothing was reset."
+/// A second call while one is in flight.
+let RESET_INSTALL_BUSY_LOG = "Advenue: resetInstall() is already running; this call did nothing."
 
 /// Thread-safe holder for the app the server reported. Diagnostics only.
 final class AcceptedAppId: @unchecked Sendable {
@@ -243,6 +248,18 @@ final class FacadeState: @unchecked Sendable {
   private var requestedConfig: AdvenueConfig?
   private var deviceReset: (any SandboxDeviceResetting)?
   private var noticeSink: (any AdvenueLogSink)?
+  /// Where `resetInstall` logs before any `start` has named a sink.
+  private let fallbackSink: (any AdvenueLogSink)?
+  /// True from the moment a `resetInstall` is accepted until it has restarted
+  /// (or given up): a second call in that window is refused, not interleaved.
+  private var resetting = false
+  /// Moves on every `stop()` (and so every `start`). A reset that sees it move
+  /// while it waited does not restart: someone else now owns the lifecycle.
+  private var generation = 0
+
+  init(fallbackSink: (any AdvenueLogSink)? = nil) {
+    self.fallbackSink = fallbackSink
+  }
 
   /// `transport` is a parameter, not a hidden construction, because an unwired
   /// transport is otherwise invisible: every component of the send path can be
@@ -270,6 +287,18 @@ final class FacadeState: @unchecked Sendable {
         appVersion: readVersion, launchedInBackground: launchedInBackground, logSink: logSink,
         advertisingSource: advertisingSource, deviceReset: deviceReset)
     }
+    // Recorded before the identity gate, so a reset on a deferred launch
+    // still knows the environment it was asked for (and says so).
+    lock.lock()
+    self.restart = restartArgs
+    self.requestedConfig = requestedConfig
+    self.noticeSink = logSink
+    self.deviceReset =
+      deviceReset
+      ?? HttpSandboxDeviceReset(
+        endpoint: requestedConfig.endpoint, apiKey: requestedConfig.apiKey,
+        signingSecret: requestedConfig.signingSecret)
+    lock.unlock()
 
     // `debug`: every swallowed failure goes through onError, so logging there
     // covers all of them — wrapped once, before anything below captures it.
@@ -409,14 +438,6 @@ final class FacadeState: @unchecked Sendable {
     self.consentDataMirror = readPersistedConsentData(store)
     self.pipe = pipe
     self.resolvedDeviceId = deviceId
-    self.restart = restartArgs
-    self.requestedConfig = requestedConfig
-    self.noticeSink = logSink
-    self.deviceReset =
-      deviceReset
-      ?? HttpSandboxDeviceReset(
-        endpoint: requestedConfig.endpoint, apiKey: requestedConfig.apiKey,
-        signingSecret: requestedConfig.signingSecret)
     let buffered = pendingDeepLinks
     pendingDeepLinks = []
     lock.unlock()
@@ -587,19 +608,74 @@ final class FacadeState: @unchecked Sendable {
     let deviceId: String
     let resetter: (any SandboxDeviceResetting)?
     let sink: any AdvenueLogSink
+    let generation: Int
+  }
+
+  private enum ResetStart {
+    /// Production, or never initialized (the default environment).
+    case notSandbox(any AdvenueLogSink)
+    /// Sandbox, but stopped or with identity deferred: nothing to reset.
+    case notRunning(any AdvenueLogSink)
+    case alreadyRunning(any AdvenueLogSink)
+    case ready(ResetTarget)
   }
 
   /// Synchronous for the reason `lookupTarget` is: NSLock is unavailable from
-  /// an async context in Swift 6 mode (PF24).
-  private func resetTarget() -> ResetTarget? {
+  /// an async context in Swift 6 mode (PF24). The environment is read first,
+  /// so production logs its line even before `initialize` or while identity
+  /// is deferred. Accepting a reset claims `resetting` in the same critical
+  /// section, so a double tap cannot start two.
+  private func beginReset() -> ResetStart {
     lock.lock()
     defer { lock.unlock() }
-    guard let config = requestedConfig, let restart, let store, let secure,
-      let deviceId = resolvedDeviceId
-    else { return nil }
-    return ResetTarget(
-      config: config, restart: restart, store: store, secure: secure, deviceId: deviceId,
-      resetter: deviceReset, sink: noticeSink ?? UnifiedLogSink())
+    let sink = noticeSink ?? fallbackSink ?? UnifiedLogSink()
+    guard let config = requestedConfig, config.environment == .sandbox else {
+      return .notSandbox(sink)
+    }
+    guard pipe != nil, let restart, let store, let secure, let deviceId = resolvedDeviceId
+    else { return .notRunning(sink) }
+    guard !resetting else { return .alreadyRunning(sink) }
+    resetting = true
+    return .ready(
+      ResetTarget(
+        config: config, restart: restart, store: store, secure: secure, deviceId: deviceId,
+        resetter: deviceReset, sink: sink, generation: generation))
+  }
+
+  private func endReset() {
+    lock.lock()
+    resetting = false
+    lock.unlock()
+  }
+
+  /// The local half's first step, atomically: the pipe is still the one the
+  /// reset started on (no stop, no re-initialize while the server answered),
+  /// `.resetInstall` goes onto THAT pipe behind every queued command, and the
+  /// pipe is detached. Nil means the SDK changed hands: do nothing further.
+  private func takePipeForReset(generation expected: Int) -> CommandPipe? {
+    lock.lock()
+    guard generation == expected, let pipe = self.pipe else {
+      lock.unlock()
+      return nil
+    }
+    pipe.submit(.resetInstall)
+    let detached = detachLocked()
+    lock.unlock()
+    detached.cancel()
+    return pipe
+  }
+
+  /// After the drain: claims the restart only if nobody stopped or
+  /// re-initialized meanwhile, and forgets the in-memory identity with it.
+  /// (The restart itself runs `start`, which takes the lock, so it follows
+  /// this check rather than sitting inside it; no await separates them.)
+  private func claimRestart(generation expected: Int) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard generation == expected else { return false }
+    pendingDeepLinks = []
+    resolvedDeviceId = nil
+    return true
   }
 
   /// The identity half of the local reset, once the engine has drained: the
@@ -612,20 +688,32 @@ final class FacadeState: @unchecked Sendable {
     }
     store.removeObject(forKey: INSTALLATION_ID_KEY)
     secure.delete(DEVICE_ID_KEY)
-    lock.lock()
-    pendingDeepLinks = []
-    resolvedDeviceId = nil
-    lock.unlock()
   }
 
   /// Spec 3 §7. See `Advenue.resetInstall()`.
+  ///
+  /// Outcomes: the new device id; or nil, with nothing changed locally, when
+  /// not in the sandbox, not running, a reset is already in flight, or the SDK
+  /// was stopped or re-initialized while the server answered. If that happens
+  /// during the (short) local drain instead, the engine's reset has run but
+  /// the identity is kept and nothing restarts: a stopped SDK stays stopped.
   func resetInstall() async -> String? {
-    guard let target = resetTarget() else { return nil }
-    // P6: a production app must not mint "new" installs.
-    guard target.config.environment == .sandbox else {
-      target.sink.log(RESET_INSTALL_PRODUCTION_LOG)
+    let target: ResetTarget
+    switch beginReset() {
+    case .notSandbox(let sink):
+      // P6: a production app must not mint "new" installs.
+      sink.log(RESET_INSTALL_PRODUCTION_LOG)
       return nil
+    case .notRunning(let sink):
+      sink.log(RESET_INSTALL_NOT_RUNNING_LOG)
+      return nil
+    case .alreadyRunning(let sink):
+      sink.log(RESET_INSTALL_BUSY_LOG)
+      return nil
+    case .ready(let ready):
+      target = ready
     }
+    defer { endReset() }
     // 1. Server: clear the old device's sandbox state. A 404 from an older
     //    server (or any failure, 429 included) is logged; the local reset goes
     //    on — the new device id alone gives the next install fresh continuity.
@@ -639,8 +727,9 @@ final class FacadeState: @unchecked Sendable {
         "Advenue: resetInstall() could not reset the server state (\(error)); continuing locally.")
     }
     // 2. Local: ordered behind every queued command, then wait for the pipe.
-    submit(.resetInstall)
-    await detach()?.shutdownAndWait()
+    guard let pipe = takePipeForReset(generation: target.generation) else { return nil }
+    await pipe.shutdownAndWait()
+    guard claimRestart(generation: target.generation) else { return nil }
     forgetInstallIdentity(store: target.store, secure: target.secure)
     // 3. A fresh start mints the ids and records the install.
     target.restart()
@@ -842,30 +931,51 @@ final class FacadeState: @unchecked Sendable {
     }
   }
 
-  /// Cancels timers, observers and the install task; detaches the pipe.
-  private func detach() -> CommandPipe? {
-    lock.lock()
-    let pipe = self.pipe
-    let timer = flushTimer
-    let observers = lifecycleObservers
-    let install = installTask
-    self.pipe = nil
+  /// What a detach takes off this state, cancelled outside the lock.
+  private struct Detached {
+    let pipe: CommandPipe?
+    let timer: DispatchSourceTimer?
+    let observers: [NSObjectProtocol]
+    let install: Task<Void, Never>?
+
+    /// Cancel before the pipe shuts down: a timer firing into a finished
+    /// stream is harmless, but leaving it running leaks a repeating source per
+    /// initialize() call. The observers go for the same reason, one instance
+    /// further out. The install task can be mid-wait for up to two minutes —
+    /// without the cancel it would submit a stale install into the next pipe.
+    func cancel() {
+      timer?.cancel()
+      install?.cancel()
+      for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    }
+  }
+
+  /// Detaches the pipe, timers, observers and the install task. The caller
+  /// holds `lock`.
+  private func detachLocked() -> Detached {
+    let detached = Detached(
+      pipe: pipe, timer: flushTimer, observers: lifecycleObservers, install: installTask)
+    pipe = nil
     flushTimer = nil
     lifecycleObservers = []
     installTask = nil
-    lock.unlock()
-    // Cancel before the pipe shuts down: a timer firing into a finished stream
-    // is harmless, but leaving it running leaks a repeating source per
-    // initialize() call. The observers go for the same reason, one instance
-    // further out. The install task can be mid-wait for up to two minutes —
-    // without the cancel it would submit a stale install into the next pipe.
-    timer?.cancel()
-    install?.cancel()
-    for observer in observers { NotificationCenter.default.removeObserver(observer) }
-    return pipe
+    return detached
   }
 
   func stop() {
-    detach()?.shutdown()
+    lock.lock()
+    // A reset waiting on the server or the drain must not revive what this stops.
+    generation += 1
+    let detached = detachLocked()
+    lock.unlock()
+    detached.cancel()
+    detached.pipe?.shutdown()
+  }
+
+  /// Test surface: whether a pipe is live.
+  var isRunning: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return pipe != nil
   }
 }

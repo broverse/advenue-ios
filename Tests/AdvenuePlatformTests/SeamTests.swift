@@ -49,6 +49,26 @@ actor RecordingSkanReporter: SkanReporter {
   }
 }
 
+/// Holds the FIRST reset call at the "server" until the test releases it, so
+/// a test can act while `resetInstall` is suspended on the network. Later
+/// calls pass straight through: a reset that should have been refused then
+/// shows up as a second call instead of hanging the suite.
+actor GatedDeviceReset: SandboxDeviceResetting {
+  private(set) var calls = 0
+  private var released = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  func reset(deviceId: String, installationId: String?) async throws {
+    calls += 1
+    if released || calls > 1 { return }
+    await withCheckedContinuation { waiter = $0 }
+  }
+  func release() {
+    released = true
+    waiter?.resume()
+    waiter = nil
+  }
+}
+
 /// Records what resetInstall asked the server to clear; can answer like an old server.
 actor RecordingDeviceReset: SandboxDeviceResetting {
   struct Call: Sendable, Equatable {
@@ -947,6 +967,121 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(defaults.string(forKey: CONSENT_KEY), "granted", "consent")
     XCTAssertEqual(defaults.string(forKey: USER_ID_KEY), "user-1", "user_id")
     XCTAssertEqual(defaults.string(forKey: ENVIRONMENT_KEY), "sandbox", "environment")
+  }
+
+  // MARK: resetInstall races (fix round 1, I1/M2)
+
+  private func startGatedSandbox(
+    _ state: FacadeState, gate: GatedDeviceReset, transport: (any EventTransport)? = nil,
+    sink: RecordingLogSink? = nil
+  ) {
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: transport ?? RecordingTransport(), sources: Self.settledSources,
+      logSink: sink, deviceReset: gate)
+  }
+
+  /// I1: `shutdown()` while the server call is out. The reset must not revive
+  /// the stopped SDK, and must not rotate the identity.
+  func testStopDuringTheServerCallCancelsTheReset() async throws {
+    let gate = GatedDeviceReset()
+    let state = newState()
+    startGatedSandbox(state, gate: gate)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = state.currentDeviceId
+    let oldInstallation = UserDefaultsStore().string(forKey: INSTALLATION_ID_KEY)
+
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { await gate.calls == 1 }
+    state.stop()
+    await gate.release()
+    let result = await reset.value
+
+    XCTAssertNil(result)
+    XCTAssertFalse(state.isRunning, "a stopped SDK was restarted")
+    XCTAssertEqual(state.currentDeviceId, old)
+    XCTAssertEqual(UserDefaultsStore().string(forKey: INSTALLATION_ID_KEY), oldInstallation)
+  }
+
+  /// I1: a re-initialize while the server call is out owns the SDK from then
+  /// on; the reset gives up rather than tearing that instance down.
+  func testReinitializeDuringTheServerCallCancelsTheReset() async throws {
+    let gate = GatedDeviceReset()
+    let state = newState()
+    startGatedSandbox(state, gate: gate)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = state.currentDeviceId
+
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { await gate.calls == 1 }
+    startGatedSandbox(state, gate: gate)
+    await gate.release()
+    let result = await reset.value
+
+    XCTAssertNil(result)
+    XCTAssertTrue(state.isRunning, "the re-initialized SDK was torn down")
+    XCTAssertEqual(state.currentDeviceId, old)
+  }
+
+  /// I1: a double tap. The first call resets; the second, made while the first
+  /// waits on the server, is refused (nil, logged) and touches nothing. The
+  /// event queued before the reset is never sent.
+  func testASecondResetWhileOneIsInFlightIsRefused() async throws {
+    let gate = GatedDeviceReset()
+    let sink = RecordingLogSink()
+    let transport = RecordingEventTransport()
+    let state = newState()
+    startGatedSandbox(state, gate: gate, transport: transport, sink: sink)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = try XCTUnwrap(state.currentDeviceId)
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+
+    let first = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { await gate.calls == 1 }
+    let second = await state.resetInstall()
+    XCTAssertNil(second)
+    XCTAssertTrue(sink.lines.contains(RESET_INSTALL_BUSY_LOG), "\(sink.lines)")
+    await gate.release()
+    let firstResult = await first.value
+    let new = try XCTUnwrap(firstResult)
+
+    XCTAssertNotEqual(new, old)
+    let calls = await gate.calls
+    XCTAssertEqual(calls, 1, "one reset reached the server")
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.type == "install" && $0.deviceId == new }
+    }
+    // The install flow's own flush may send it before the reset is taken (the
+    // gate holds the reset long enough); what must never happen is a second
+    // send, or one under the new device.
+    let sent = await transport.events.filter { $0.name == "before_reset" }
+    XCTAssertLessThanOrEqual(sent.count, 1, "the old queue was resent")
+    XCTAssertFalse(sent.contains { $0.deviceId == new }, "an old event moved to the new device")
+  }
+
+  /// M2: production says so even before initialize.
+  func testResetInstallBeforeInitializeLogsTheProductionLine() async {
+    let sink = RecordingLogSink()
+    let state = FacadeState(fallbackSink: sink)
+    states.append(state)
+    let result = await state.resetInstall()
+    XCTAssertNil(result)
+    XCTAssertEqual(sink.lines, [RESET_INSTALL_PRODUCTION_LOG])
+  }
+
+  /// M2: a sandbox SDK that is not running says why, without identifiers.
+  func testResetInstallOnAStoppedSandboxSaysSo() async throws {
+    let gate = GatedDeviceReset()
+    let sink = RecordingLogSink()
+    let state = newState()
+    startGatedSandbox(state, gate: gate, sink: sink)
+    state.stop()
+    let result = await state.resetInstall()
+    XCTAssertNil(result)
+    XCTAssertTrue(sink.lines.contains(RESET_INSTALL_NOT_RUNNING_LOG), "\(sink.lines)")
+    let calls = await gate.calls
+    XCTAssertEqual(calls, 0)
   }
 }
 
