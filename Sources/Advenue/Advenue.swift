@@ -256,6 +256,12 @@ final class FacadeState: @unchecked Sendable {
   /// Moves on every `stop()` (and so every `start`). A reset that sees it move
   /// while it waited does not restart: someone else now owns the lifecycle.
   private var generation = 0
+  /// F13: non-nil while a reset's drain has the pipe detached. setConsent,
+  /// setConsentData and setUserId made in that window wait here and go onto
+  /// the next pipe `start` builds (the restart, or a re-initialize); without
+  /// it they would be dropped, and the restart would reseed the consent
+  /// mirror from the store the drain began with.
+  private var resetBuffer: [Command]?
 
   init(fallbackSink: (any AdvenueLogSink)? = nil) {
     self.fallbackSink = fallbackSink
@@ -437,6 +443,18 @@ final class FacadeState: @unchecked Sendable {
     self.consentMirror = store.string(forKey: CONSENT_KEY) == "granted"
     self.consentDataMirror = readPersistedConsentData(store)
     self.pipe = pipe
+    // F13: what the app set while a reset drained, in order, ahead of the
+    // install, and reflected in the getters the store just reseeded.
+    let carried = resetBuffer ?? []
+    resetBuffer = nil
+    for command in carried {
+      switch command {
+      case .setConsent(let granted): consentMirror = granted
+      case .setConsentData(let consent): consentDataMirror = consent
+      default: break
+      }
+      pipe.submit(command)
+    }
     self.resolvedDeviceId = deviceId
     let buffered = pendingDeepLinks
     pendingDeepLinks = []
@@ -538,6 +556,11 @@ final class FacadeState: @unchecked Sendable {
     lock.lock()
     let pipe = self.pipe
     let source = self.advertisingSource
+    if pipe == nil, resetBuffer != nil, Self.survivesReset(command) {
+      resetBuffer?.append(command)
+      lock.unlock()
+      return
+    }
     lock.unlock()
     guard let pipe else { return }
     switch command {
@@ -571,6 +594,15 @@ final class FacadeState: @unchecked Sendable {
     }
   }
 
+  /// What `resetInstallState` keeps (consent and the customer user id), so
+  /// what a reset's drain must not drop.
+  private static func survivesReset(_ command: Command) -> Bool {
+    switch command {
+    case .setConsent, .setConsentData, .setUserId: return true
+    default: return false
+    }
+  }
+
   /// Remembers a vendor id that was read, and fills one that could not be.
   private func resolveVendorId(_ read: String?) -> String? {
     lock.lock()
@@ -586,6 +618,9 @@ final class FacadeState: @unchecked Sendable {
   func forgetMe() {
     submit(.forgetMe)
     lock.lock()
+    // F14: a reset waiting on the server must not restart an erased SDK under
+    // a fresh identity.
+    generation += 1
     // Erasure clears the read caches too: a getter still answering "granted"
     // after forgetMe would report a consent the device no longer holds.
     consentMirror = false
@@ -645,7 +680,18 @@ final class FacadeState: @unchecked Sendable {
   private func endReset() {
     lock.lock()
     resetting = false
+    resetBuffer = nil
     lock.unlock()
+  }
+
+  /// A reset that gave up after detaching the pipe: what was buffered goes to
+  /// whatever pipe exists now (none, if the SDK was stopped).
+  private func releaseResetBuffer() {
+    lock.lock()
+    let carried = resetBuffer ?? []
+    resetBuffer = nil
+    lock.unlock()
+    for command in carried { submit(command) }
   }
 
   /// The local half's first step, atomically: the pipe is still the one the
@@ -660,6 +706,7 @@ final class FacadeState: @unchecked Sendable {
     }
     pipe.submit(.resetInstall)
     let detached = detachLocked()
+    resetBuffer = []
     lock.unlock()
     detached.cancel()
     return pipe
@@ -729,7 +776,10 @@ final class FacadeState: @unchecked Sendable {
     // 2. Local: ordered behind every queued command, then wait for the pipe.
     guard let pipe = takePipeForReset(generation: target.generation) else { return nil }
     await pipe.shutdownAndWait()
-    guard claimRestart(generation: target.generation) else { return nil }
+    guard claimRestart(generation: target.generation) else {
+      releaseResetBuffer()
+      return nil
+    }
     forgetInstallIdentity(store: target.store, secure: target.secure)
     // 3. A fresh start mints the ids and records the install.
     target.restart()

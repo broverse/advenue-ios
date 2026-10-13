@@ -69,6 +69,24 @@ actor GatedDeviceReset: SandboxDeviceResetting {
   }
 }
 
+/// Holds the FIRST send until the test releases it, so the pipe is stuck in a
+/// flush: a `resetInstall` taken then waits in its drain (the slow-flush case).
+actor GatedTransport: EventTransport {
+  private(set) var sends = 0
+  private var released = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  func send(_ events: [ClientEvent]) async throws {
+    sends += 1
+    if released || sends > 1 { return }
+    await withCheckedContinuation { waiter = $0 }
+  }
+  func release() {
+    released = true
+    waiter?.resume()
+    waiter = nil
+  }
+}
+
 /// Records what resetInstall asked the server to clear; can answer like an old server.
 actor RecordingDeviceReset: SandboxDeviceResetting {
   struct Call: Sendable, Equatable {
@@ -1058,6 +1076,57 @@ final class SeamTests: XCTestCase {
     let sent = await transport.events.filter { $0.name == "before_reset" }
     XCTAssertLessThanOrEqual(sent.count, 1, "the old queue was resent")
     XCTAssertFalse(sent.contains { $0.deviceId == new }, "an old event moved to the new device")
+  }
+
+  /// F13: consent and the user id set while the reset drains (pipe detached,
+  /// waiting behind a slow flush) reach the restarted engine, and the
+  /// consent getter does not fall back to the value the drain started with.
+  func testConsentAndUserIdSetDuringTheDrainSurviveTheReset() async throws {
+    let gate = GatedDeviceReset()
+    await gate.release()
+    let transport = GatedTransport()
+    let state = newState()
+    startGatedSandbox(state, gate: gate, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.rememberConsent(true)
+    state.submit(.setConsent(true))
+    state.submit(.setUserId("user-1"))
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+    try await Self.until(timeout: 5, state: state) { await transport.sends == 1 }
+
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { !state.isRunning }
+    state.rememberConsent(false)
+    state.submit(.setConsent(false))
+    state.submit(.setUserId("user-2"))
+    await transport.release()
+    let result = await reset.value
+    _ = try XCTUnwrap(result)
+
+    XCTAssertFalse(state.trackingConsent, "the getter fell back to the pre-reset consent")
+    try await Self.until(timeout: 5) {
+      let defaults = UserDefaultsStore()
+      return defaults.string(forKey: CONSENT_KEY) == "denied"
+        && defaults.string(forKey: USER_ID_KEY) == "user-2"
+    }
+  }
+
+  /// F14: forgetMe while the server call is out cancels the reset: the erased
+  /// SDK is not restarted under a fresh identity.
+  func testForgetMeDuringTheServerCallCancelsTheReset() async throws {
+    let gate = GatedDeviceReset()
+    let state = newState()
+    startGatedSandbox(state, gate: gate)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { await gate.calls == 1 }
+    state.forgetMe()
+    await gate.release()
+    let result = await reset.value
+
+    XCTAssertNil(result, "the reset restarted an erased SDK")
+    XCTAssertNil(state.currentDeviceId, "a fresh identity was minted after forgetMe")
   }
 
   /// M2: production says so even before initialize.
