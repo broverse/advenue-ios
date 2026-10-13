@@ -24,6 +24,9 @@ stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
   that arrives meanwhile is delivered to the new install.
 - Fixed: `Advenue.resolveDeferredDeepLink()` always returned nil without asking
   the server. It now polls the conversion lookup for this device.
+- After `Advenue.shutdown()`, `deviceId()` returns nil and
+  `resolveDeferredDeepLink()` returns nil without polling, until the next
+  `initialize`.
 
 ## 1.3.0 (2026-10-12)
 

@@ -117,6 +117,28 @@ final class ResetInstallCoreTests: XCTestCase {
     XCTAssertNil(store.raw(key), "the old installation's SKAN state was written back")
   }
 
+  /// K25: a stopped (not reset) engine's SKAN update is still out at Apple
+  /// when another instance's reset removes the installation's state. The late
+  /// confirm must not write it back.
+  func testALateSkanUpdateFromAStoppedEngineDoesNotRewriteRemovedState() async throws {
+    let store = MemoryStore()
+    let e = engine(store)
+    let reporter = GatedSkanReporter()
+    await e.enableSkan(
+      mapper: try ConversionValueMapper(
+        ConversionValueConfig(rules: [ConversionValueRule(fineValue: 10, events: ["signup"])])),
+      currency: nil, installationId: "inst-old", reporter: reporter)
+    let key = skanStateKey(installationId: "inst-old")
+
+    let recording = Task { await e.recordSkan(event: "signup") }
+    try await until { await reporter.calls == 1 }
+    store.removeObject(forKey: key)
+    await reporter.release()
+    await recording.value
+
+    XCTAssertNil(store.raw(key))
+  }
+
   /// K11: `shutdownAndWait` waits for the command already running. While the
   /// transport holds a flush it has not returned; once released, it does.
   func testShutdownAndWaitWaitsForTheCommandInFlight() async throws {

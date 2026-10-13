@@ -99,6 +99,8 @@ public actor AdvenueEngine {
     attestation: AttestationResult?, challenge: String?)?
   private var skan: SkanStateMachine?
   private var skanReporter: (any SkanReporter)?
+  /// The installation the SKAN machine persists under (K25).
+  private var skanInstallationId: String?
   /// F-SDK-3: when this launch began an install that is not recorded yet.
   /// The install is stamped with it — the first open, not the moment the
   /// enrichment that preceded it finished.
@@ -375,6 +377,7 @@ public actor AdvenueEngine {
       store: store, clock: clock, installationId: installationId,
       mapper: mapper, currency: currency, configVersion: configVersion)
     skanReporter = reporter
+    skanInstallationId = installationId
     reporter.register()
   }
 
@@ -400,14 +403,23 @@ public actor AdvenueEngine {
         fine: update.fineValue, coarse: update.coarseValue, lockWindow: update.lockWindow)
       // K10: the await above lets other commands run. A reset or erasure that
       // landed meanwhile has finished this installation; its state key is gone
-      // (or going), and confirming would write it back.
-      guard !forgotten else { return }
+      // (or going), and confirming would write it back. K25: the same holds
+      // when another instance's reset removed the key (this engine was stopped,
+      // not reset, so it is not forgotten): `record` persisted the key before
+      // the await, so a missing key means someone retired the installation.
+      guard skanStateStillLive() else { return }
       skan.confirm(update)
     } catch {
-      guard !forgotten else { return }
+      guard skanStateStillLive() else { return }
       skan.abandon(update)
       onError("skan.update", error)
     }
+  }
+
+  private func skanStateStillLive() -> Bool {
+    guard !forgotten else { return false }
+    guard let skanInstallationId else { return true }
+    return store.string(forKey: skanStateKey(installationId: skanInstallationId)) != nil
   }
 
   /// Registers the device's push token for uninstall measurement (#26).

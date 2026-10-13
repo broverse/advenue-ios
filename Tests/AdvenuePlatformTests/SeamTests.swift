@@ -141,6 +141,52 @@ final class ScriptedSecureStore: SecureStore, @unchecked Sendable {
   }
 }
 
+/// Parks the first line it is given until `proceed` is signalled, so a test can
+/// hold a `start` part-way (after it took over the reset buffer, before it
+/// resolves identity). Later lines pass straight through.
+final class ParkingSink: AdvenueLogSink, @unchecked Sendable {
+  private let lock = NSLock()
+  private var seen = false
+  private var parkedNow = false
+  let proceed = DispatchSemaphore(value: 0)
+  var parked: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return parkedNow
+  }
+  func log(_ message: String) {
+    lock.lock()
+    let first = !seen
+    seen = true
+    if first { parkedNow = true }
+    lock.unlock()
+    if first { proceed.wait() }
+  }
+}
+
+/// Calls `body` on the first line it is given, then just records.
+final class HookSink: AdvenueLogSink, @unchecked Sendable {
+  private let lock = NSLock()
+  private var hook: (() -> Void)?
+  func arm(_ body: @escaping () -> Void) {
+    lock.lock()
+    hook = body
+    lock.unlock()
+  }
+  func log(_ message: String) {
+    lock.lock()
+    let body = hook
+    hook = nil
+    lock.unlock()
+    body?()
+  }
+}
+
+/// A failure whose text carries an identifier, as a careless error might.
+struct LeakyError: Error, CustomStringConvertible {
+  var description: String { "device 11111111-2222-3333-4444-555555555555 refused" }
+}
+
 /// Answers the deferred-deep-link lookup at once, and remembers who asked.
 final class StubConversionFetcher: ConversionFetcher, @unchecked Sendable {
   let result: ConversionResult
@@ -1277,6 +1323,136 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(sink.lines.contains(RESET_INSTALL_NOT_RUNNING_LOG), "\(sink.lines)")
   }
 
+  /// K19: forgetMe, then a re-initialize, both during the drain. The start
+  /// takes the erasure over before it resolves identity, so the reset's settle
+  /// (running while the start is parked) cannot consume it. The new instance
+  /// performs the erasure: no install, no identity, no consent.
+  func testForgetMeAndAReinitializeDuringTheDrainStillErase() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    let reset = try await startResetInTheDrain(state, transport: transport)
+    state.submit(.setConsent(true))
+    state.forgetMe()
+
+    let sink = ParkingSink()
+    let newTransport = RecordingEventTransport()
+    let done = ErrorContexts()
+    let gate = GatedDeviceReset()
+    await gate.release()
+    let sources = Self.settledSources
+    Thread {
+      var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+      config.flushIntervalMs = 0
+      state.start(
+        config, transport: newTransport, sources: sources, logSink: sink, deviceReset: gate)
+      done.add("started")
+    }.start()
+    try await Self.until(timeout: 5) { sink.parked }
+    await transport.release()
+    let result = await reset.value
+    XCTAssertNil(result)
+    sink.proceed.signal()
+    try await Self.until(timeout: 5) { done.all == ["started"] }
+
+    XCTAssertNil(state.currentDeviceId, "the re-initialize kept an identity after forgetMe")
+    XCTAssertFalse(state.trackingConsent)
+    try await Self.until(timeout: 5) {
+      UserDefaultsStore().string(forKey: CONSENT_KEY) == nil
+    }
+    state.submit(.flush)
+    try await Task.sleep(nanoseconds: 300_000_000)
+    let installs = await newTransport.events.filter { $0.type == "install" }
+    XCTAssertTrue(installs.isEmpty, "an install was sent after forgetMe")
+  }
+
+  /// K20: a re-initialize performs the erasure while the old engine is still
+  /// draining; the old engine's flush then writes the queue behind it. Once the
+  /// drain is over, what it could write is removed again.
+  func testOldEngineWritesBehindAStartsErasureAreRemoved() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    let files = try XCTUnwrap(CacheFileStore.caches())
+    let store = CompositeStore(files: files)
+    let reset = try await startResetInTheDrain(state, transport: transport)
+    state.forgetMe()
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate, transport: RecordingEventTransport())
+    try await Self.until(timeout: 5) { store.string(forKey: QUEUE_KEY) == nil }
+
+    await transport.release()
+    _ = await reset.value
+
+    XCTAssertNil(store.string(forKey: QUEUE_KEY), "the old engine's queue survived the erasure")
+    XCTAssertNil(UserDefaultsStore().string(forKey: INSTALL_SENT_KEY))
+  }
+
+  /// K23: after shutdown the SDK answers for no device, and the deferred deep
+  /// link lookup does not poll.
+  func testAStoppedSdkAnswersForNoDevice() async throws {
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: RecordingTransport(), sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.stop()
+    let asked = ErrorContexts()
+
+    let link = await state.fetchDeferredDeepLink(
+      makeFetcher: { _, id in
+        asked.add(id)
+        return StubConversionFetcher(.resolved(DeepLink(deepLinkValue: "promo")))
+      },
+      sleep: { _ in })
+
+    XCTAssertNil(state.currentDeviceId)
+    XCTAssertNil(link)
+    XCTAssertTrue(asked.all.isEmpty, "a stopped SDK polled the conversion lookup")
+  }
+
+  /// K24: the server-failure line names the failure, never an identifier.
+  func testTheServerFailureLineCarriesNoIdentifier() async throws {
+    actor LeakyReset: SandboxDeviceResetting {
+      func reset(deviceId: String, installationId: String?) async throws { throw LeakyError() }
+    }
+    let sink = RecordingLogSink()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink,
+      deviceReset: LeakyReset())
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    _ = await state.resetInstall()
+
+    let said = sink.lines.filter { $0.contains("could not reset the server state") }
+    XCTAssertEqual(said.count, 1, "\(sink.lines)")
+    XCTAssertFalse(said[0].contains("11111111"), said[0])
+    XCTAssertTrue(said[0].contains("LeakyError"), said[0])
+  }
+
+  /// K25: forgetMe lands after the restart claimed the SDK (here, from the
+  /// restart's own first log line). The minted id was erased with everything
+  /// else, so the reset returns nil rather than an id the device no longer has.
+  func testAnErasureAfterTheClaimReturnsNil() async throws {
+    let sink = HookSink()
+    let state = newState()
+    let gate = GatedDeviceReset()
+    await gate.release()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink,
+      deviceReset: gate)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    sink.arm { state.forgetMe() }
+
+    let result = await state.resetInstall()
+
+    XCTAssertNil(result, "returned an id erased after the claim")
+  }
+
   /// K17: resolveDeferredDeepLink asks the server for this device, with the
   /// config the SDK was started with. It returned nil without asking anyone:
   /// the config it read was never recorded.
@@ -1318,7 +1494,7 @@ final class SeamTests: XCTestCase {
 
     XCTAssertNil(result)
     XCTAssertFalse(state.isRunning, "a stopped SDK was restarted")
-    XCTAssertEqual(state.currentDeviceId, old)
+    XCTAssertEqual(KeychainStore().read(DEVICE_ID_KEY), old.map { .found($0) })
     XCTAssertEqual(UserDefaultsStore().string(forKey: INSTALLATION_ID_KEY), oldInstallation)
   }
 
