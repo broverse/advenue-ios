@@ -182,6 +182,28 @@ final class HookSink: AdvenueLogSink, @unchecked Sendable {
   }
 }
 
+/// Every pipe a FacadeState built.
+final class PipeLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var pipes: [CommandPipe] = []
+  func add(_ pipe: CommandPipe) { lock.lock(); pipes.append(pipe); lock.unlock() }
+  var all: [CommandPipe] { lock.lock(); defer { lock.unlock() }; return pipes }
+}
+
+/// Reset tasks started from many threads.
+final class TaskLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var tasks: [Task<String?, Never>] = []
+  func add(_ task: Task<String?, Never>) { lock.lock(); tasks.append(task); lock.unlock() }
+  func drain() -> [Task<String?, Never>] {
+    lock.lock()
+    defer { lock.unlock() }
+    let out = tasks
+    tasks = []
+    return out
+  }
+}
+
 /// A failure whose text carries an identifier, as a careless error might.
 struct LeakyError: Error, CustomStringConvertible {
   var description: String { "device 11111111-2222-3333-4444-555555555555 refused" }
@@ -1323,68 +1345,97 @@ final class SeamTests: XCTestCase {
     XCTAssertFalse(sink.lines.contains(RESET_INSTALL_NOT_RUNNING_LOG), "\(sink.lines)")
   }
 
-  /// K19: forgetMe, then a re-initialize, both during the drain. The start
-  /// takes the erasure over before it resolves identity, so the reset's settle
-  /// (running while the start is parked) cannot consume it. The new instance
-  /// performs the erasure: no install, no identity, no consent.
+  /// K19/K27: forgetMe, then a re-initialize, both during the drain. The
+  /// erasure is complete when forgetMe returns (stop, fence, wipe), so the
+  /// re-initialize can only start fresh: a new identity, no consent, no user
+  /// id, and nothing ever sent under the erased device id.
   func testForgetMeAndAReinitializeDuringTheDrainStillErase() async throws {
     let transport = GatedRecordingTransport()
     let state = newState()
     let reset = try await startResetInTheDrain(state, transport: transport)
+    guard case .found(let old) = KeychainStore().read(DEVICE_ID_KEY) else {
+      return XCTFail("precondition: a stored device id")
+    }
     state.submit(.setConsent(true))
+    state.submit(.setUserId("user-1"))
     state.forgetMe()
 
-    let sink = ParkingSink()
     let newTransport = RecordingEventTransport()
-    let done = ErrorContexts()
     let gate = GatedDeviceReset()
     await gate.release()
-    let sources = Self.settledSources
-    Thread {
-      var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
-      config.flushIntervalMs = 0
-      state.start(
-        config, transport: newTransport, sources: sources, logSink: sink, deviceReset: gate)
-      done.add("started")
-    }.start()
-    try await Self.until(timeout: 5) { sink.parked }
+    startGatedSandbox(state, gate: gate, transport: newTransport)
     await transport.release()
     let result = await reset.value
-    XCTAssertNil(result)
-    sink.proceed.signal()
-    try await Self.until(timeout: 5) { done.all == ["started"] }
 
-    XCTAssertNil(state.currentDeviceId, "the re-initialize kept an identity after forgetMe")
+    XCTAssertNil(result)
+    let now = try XCTUnwrap(state.currentDeviceId)
+    XCTAssertNotEqual(now, old, "the re-initialize resolved the erased identity")
+    XCTAssertEqual(KeychainStore().read(DEVICE_ID_KEY), .found(now))
     XCTAssertFalse(state.trackingConsent)
-    try await Self.until(timeout: 5) {
-      UserDefaultsStore().string(forKey: CONSENT_KEY) == nil
+    try await Self.until(timeout: 5, state: state) {
+      await newTransport.events.contains { $0.type == "install" }
     }
-    state.submit(.flush)
-    try await Task.sleep(nanoseconds: 300_000_000)
-    let installs = await newTransport.events.filter { $0.type == "install" }
-    XCTAssertTrue(installs.isEmpty, "an install was sent after forgetMe")
+    let defaults = UserDefaultsStore()
+    XCTAssertNil(defaults.string(forKey: CONSENT_KEY), "consent survived the erasure")
+    XCTAssertNil(defaults.string(forKey: USER_ID_KEY), "user id survived the erasure")
+    let underOld = await newTransport.events.filter { $0.deviceId == old }
+    XCTAssertTrue(underOld.isEmpty, "an event was sent under the erased device id")
   }
 
-  /// K20: a re-initialize performs the erasure while the old engine is still
-  /// draining; the old engine's flush then writes the queue behind it. Once the
-  /// drain is over, what it could write is removed again.
-  func testOldEngineWritesBehindAStartsErasureAreRemoved() async throws {
+  /// K27 (the store fence): a setting queued on the old pipe before the reset
+  /// is written by the draining engine only after the erasure and the
+  /// re-initialize. It must not land: nothing is written behind an erasure.
+  func testAnOldEngineCannotWriteBehindAnErasure() async throws {
     let transport = GatedRecordingTransport()
     let state = newState()
-    let files = try XCTUnwrap(CacheFileStore.caches())
-    let store = CompositeStore(files: files)
-    let reset = try await startResetInTheDrain(state, transport: transport)
-    state.forgetMe()
+    defer { UserDefaultsStore().removeObject(forKey: USER_ID_KEY) }
     let gate = GatedDeviceReset()
     await gate.release()
-    startGatedSandbox(state, gate: gate, transport: RecordingEventTransport())
-    try await Self.until(timeout: 5) { store.string(forKey: QUEUE_KEY) == nil }
+    startGatedSandbox(state, gate: gate, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+    try await Self.until(timeout: 5, state: state) { await transport.sends == 1 }
+    // Queued behind the held flush, so the old engine runs them during the drain.
+    state.submit(.setUserId("old-user"))
+    state.submit(.track(name: "late", properties: nil, type: "custom"))
+    state.submit(.flush)
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { !state.isRunning }
 
+    state.forgetMe()
+    startGatedSandbox(state, gate: gate, transport: RecordingEventTransport())
+    await transport.release()
+    _ = await reset.value
+    try await Task.sleep(nanoseconds: 200_000_000)
+
+    XCTAssertNil(UserDefaultsStore().string(forKey: USER_ID_KEY), "written behind the erasure")
+    let late = await transport.events.filter { $0.name == "late" }
+    XCTAssertTrue(late.isEmpty, "uploaded behind the erasure")
+  }
+
+  /// K27 (the store fence): without an erasure, the app's settings queued on
+  /// the old pipe still land after a re-initialize; they are its latest word.
+  func testAnOldEnginesSettingStillLandsAfterAReinitialize() async throws {
+    let transport = GatedRecordingTransport()
+    let state = newState()
+    defer { UserDefaultsStore().removeObject(forKey: USER_ID_KEY) }
+    let gate = GatedDeviceReset()
+    await gate.release()
+    startGatedSandbox(state, gate: gate, transport: transport)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+    try await Self.until(timeout: 5, state: state) { await transport.sends == 1 }
+    state.submit(.setUserId("old-user"))
+    let reset = Task { await state.resetInstall() }
+    try await Self.until(timeout: 5) { !state.isRunning }
+
+    startGatedSandbox(state, gate: gate, transport: RecordingEventTransport())
     await transport.release()
     _ = await reset.value
 
-    XCTAssertNil(store.string(forKey: QUEUE_KEY), "the old engine's queue survived the erasure")
-    XCTAssertNil(UserDefaultsStore().string(forKey: INSTALL_SENT_KEY))
+    try await Self.until(timeout: 5) {
+      UserDefaultsStore().string(forKey: USER_ID_KEY) == "old-user"
+    }
   }
 
   /// K23: after shutdown the SDK answers for no device, and the deferred deep
@@ -1451,6 +1502,113 @@ final class SeamTests: XCTestCase {
     let result = await state.resetInstall()
 
     XCTAssertNil(result, "returned an id erased after the claim")
+  }
+
+  /// K31: with debug logging on, nothing the SDK logs about a failed server
+  /// reset carries an identifier, the onError line included.
+  func testDebugLoggingOfAServerFailureCarriesNoIdentifier() async throws {
+    actor LeakyReset: SandboxDeviceResetting {
+      func reset(deviceId: String, installationId: String?) async throws { throw LeakyError() }
+    }
+    let sink = RecordingLogSink()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    config.debug = true
+    let reported = ErrorContexts()
+    config.onError = { context, error in reported.add("\(context): \(error)") }
+    state.start(
+      config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink,
+      deviceReset: LeakyReset())
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    _ = await state.resetInstall()
+
+    XCTAssertFalse(sink.lines.contains { $0.contains("11111111") }, "\(sink.lines)")
+    let server = reported.all.filter { $0.hasPrefix("resetInstall.server") }
+    XCTAssertEqual(server, ["resetInstall.server: LeakyError"])
+  }
+
+  /// K27: many initialize, forgetMe, stop, resetInstall, setting and deep-link
+  /// calls at once, then a final forgetMe racing a re-initialize and resets.
+  /// Whatever the interleaving: the erasure is never lost (no consent or user
+  /// id survives it, no erased device id comes back), no pipe is orphaned, and
+  /// no buffered setting is applied twice.
+  func testLifecycleStressKeepsTheInvariants() async throws {
+    for round in 0..<8 { try await stressRound(round) }
+  }
+
+  private func stressRound(_ round: Int) async throws {
+    let state = newState()
+    let pipes = PipeLog()
+    let applied = ErrorContexts()
+    state.onPipeCreated = { pipes.add($0) }
+    state.onCarryApplied = { command in
+      if case .setUserId(let id?) = command { applied.add(id) }
+    }
+    let transport = RecordingEventTransport()
+    let resets = TaskLog()
+    let sources = Self.settledSources
+    let start: @Sendable () -> Void = {
+      var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+      config.flushIntervalMs = 0
+      state.start(
+        config, transport: transport, sources: sources, deviceReset: RecordingDeviceReset())
+    }
+    start()
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    defer {
+      let defaults = UserDefaultsStore()
+      defaults.removeObject(forKey: CONSENT_KEY)
+      defaults.removeObject(forKey: USER_ID_KEY)
+    }
+
+    DispatchQueue.concurrentPerform(iterations: 60) { i in
+      switch i % 6 {
+      case 0: start()
+      case 1: resets.add(Task { await state.resetInstall() })
+      case 2:
+        state.submit(.setUserId("r\(round)-\(i)"))
+        state.submit(.setConsent(i % 4 == 0))
+      case 3: state.forgetMe()
+      case 4: state.stop()
+      default: state.deepLink(URL(string: "https://example.com/\(i)")!)
+      }
+    }
+    for task in resets.drain() { _ = await task.value }
+
+    var erasedIds = Set(await transport.events.compactMap(\.deviceId))
+    if let id = state.currentDeviceId { erasedIds.insert(id) }
+    if case .found(let id) = KeychainStore().read(DEVICE_ID_KEY) { erasedIds.insert(id) }
+
+    DispatchQueue.concurrentPerform(iterations: 4) { i in
+      switch i {
+      case 0: state.forgetMe()
+      case 1: start()
+      default: resets.add(Task { await state.resetInstall() })
+      }
+    }
+    for task in resets.drain() { _ = await task.value }
+    try await Task.sleep(nanoseconds: 300_000_000)
+
+    // The erasure is never lost, and no setting is applied after it.
+    let defaults = UserDefaultsStore()
+    XCTAssertNil(defaults.string(forKey: CONSENT_KEY), "round \(round): consent survived")
+    XCTAssertNil(defaults.string(forKey: USER_ID_KEY), "round \(round): user id survived")
+    if case .found(let id) = KeychainStore().read(DEVICE_ID_KEY) {
+      XCTAssertFalse(erasedIds.contains(id), "round \(round): an erased device id came back")
+    }
+    if let id = state.currentDeviceId {
+      XCTAssertFalse(erasedIds.contains(id), "round \(round): running under an erased id")
+    }
+    // Buffered settings are applied at most once.
+    XCTAssertEqual(applied.all.count, Set(applied.all).count, "round \(round): applied twice")
+    // No pipe is orphaned: at most the live one is unfinished, and none after stop.
+    let unfinished = pipes.all.filter { !$0.isFinished }
+    XCTAssertLessThanOrEqual(unfinished.count, 1, "round \(round)")
+    if !unfinished.isEmpty { XCTAssertTrue(state.isRunning, "round \(round): orphaned pipe") }
+    state.stop()
+    XCTAssertTrue(pipes.all.allSatisfy(\.isFinished), "round \(round): a pipe outlived stop")
   }
 
   /// K17: resolveDeferredDeepLink asks the server for this device, with the
@@ -1562,6 +1720,10 @@ final class SeamTests: XCTestCase {
     await gate.release()
     let transport = GatedTransport()
     let state = newState()
+    let applied = ErrorContexts()
+    state.onCarryApplied = { command in
+      if case .setUserId(let id?) = command { applied.add(id) }
+    }
     startGatedSandbox(state, gate: gate, transport: transport)
     try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
     state.rememberConsent(true)
@@ -1585,6 +1747,8 @@ final class SeamTests: XCTestCase {
       return defaults.string(forKey: CONSENT_KEY) == "denied"
         && defaults.string(forKey: USER_ID_KEY) == "user-2"
     }
+    // K27: the buffered setting was applied once, by the restart, not again by the settle.
+    XCTAssertEqual(applied.all, ["user-2"])
   }
 
   /// F14: forgetMe while the server call is out cancels the reset: the erased

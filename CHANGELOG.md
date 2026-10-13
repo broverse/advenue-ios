@@ -27,6 +27,9 @@ stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 - After `Advenue.shutdown()`, `deviceId()` returns nil and
   `resolveDeferredDeepLink()` returns nil without polling, until the next
   `initialize`.
+- `forgetMe()` now also stops the SDK until the next `initialize` (an erased
+  SDK already recorded nothing). The erasure is complete when it returns;
+  consent or a user id set afterwards is still saved for the next start.
 
 ## 1.3.0 (2026-10-12)
 

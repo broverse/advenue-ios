@@ -667,6 +667,21 @@ public enum Command: Sendable {
 public final class CommandPipe: @unchecked Sendable {
   private let continuation: AsyncStream<Command>.Continuation
   private var consumer: Task<Void, Never>?
+  private let finishedLock = NSLock()
+  private var finished = false
+
+  /// Whether this pipe was shut down (test surface: no pipe may be orphaned).
+  public var isFinished: Bool {
+    finishedLock.lock()
+    defer { finishedLock.unlock() }
+    return finished
+  }
+
+  private func markFinished() {
+    finishedLock.lock()
+    finished = true
+    finishedLock.unlock()
+  }
 
   public init(
     engine: AdvenueEngine,
@@ -750,6 +765,7 @@ public final class CommandPipe: @unchecked Sendable {
   }
 
   public func shutdown() {
+    markFinished()
     continuation.finish()
     consumer = nil
   }
@@ -758,6 +774,7 @@ public final class CommandPipe: @unchecked Sendable {
   /// run (resetInstall must not race a pending write of the old queue).
   public func shutdownAndWait() async {
     let task = consumer
+    markFinished()
     continuation.finish()
     consumer = nil
     await task?.value

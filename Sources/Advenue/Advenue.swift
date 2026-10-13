@@ -111,7 +111,8 @@ public enum Advenue {
     await state.fetchDeferredDeepLink()
   }
 
-  /// Erasure. Spans both stores — see `FacadeState.forgetMe`.
+  /// Erasure. Spans both stores — see `FacadeState.forgetMe`. The SDK stops
+  /// (an erased SDK records nothing) until the next `initialize`.
   public static func forgetMe() { state.forgetMe() }
 
   /// Sandbox only (spec 3 §7): makes this device a new install without
@@ -185,6 +186,60 @@ let RESET_INSTALL_BUSY_LOG = "Advenue: resetInstall() is already running; this c
 struct ResetPlan {
   let expected: Int
   let mintedDeviceId: String
+}
+
+/// An engine's uploads (K27): dropped, as if delivered, once `allowed` says an
+/// erasure happened since the engine started.
+struct FencedTransport: EventTransport {
+  let inner: any EventTransport
+  let allowed: @Sendable () -> Bool
+  func send(_ events: [ClientEvent]) async throws {
+    guard allowed() else { return }
+    try await inner.send(events)
+  }
+}
+
+/// The store an engine writes through (K27). Reads pass. A write of one of
+/// the app's settings lands while `canWriteSettings` (no erasure since the
+/// engine started); any other write lands while `canWriteBookkeeping` (the
+/// engine still owns the store).
+final class FencedStore: KeyValueStore, @unchecked Sendable {
+  private static let settingKeys: Set<String> = [CONSENT_KEY, CONSENT_DATA_KEY, USER_ID_KEY]
+  private let inner: any KeyValueStore
+  private let canWriteSettings: @Sendable () -> Bool
+  private let canWriteBookkeeping: @Sendable () -> Bool
+  init(
+    inner: any KeyValueStore, canWriteSettings: @escaping @Sendable () -> Bool,
+    canWriteBookkeeping: @escaping @Sendable () -> Bool
+  ) {
+    self.inner = inner
+    self.canWriteSettings = canWriteSettings
+    self.canWriteBookkeeping = canWriteBookkeeping
+  }
+  func string(forKey key: String) -> String? { inner.string(forKey: key) }
+  func set(_ value: String, forKey key: String) {
+    if allowed(key) { inner.set(value, forKey: key) }
+  }
+  func removeObject(forKey key: String) {
+    if allowed(key) { inner.removeObject(forKey: key) }
+  }
+  private func allowed(_ key: String) -> Bool {
+    Self.settingKeys.contains(key) ? canWriteSettings() : canWriteBookkeeping()
+  }
+}
+
+/// What `onError("resetInstall.server", …)` receives (K31): a description with
+/// no identifier in it, and the original error for an app that wants it.
+struct ResetServerError: Error, CustomStringConvertible {
+  let description: String
+  let underlying: any Error
+}
+
+/// A log sink made of a closure.
+struct CallbackLogSink: AdvenueLogSink {
+  let body: @Sendable (String) -> Void
+  init(_ body: @escaping @Sendable (String) -> Void) { self.body = body }
+  func log(_ message: String) { body(message) }
 }
 
 /// Thread-safe holder for the app the server reported. Diagnostics only.
@@ -274,22 +329,42 @@ final class FacadeState: @unchecked Sendable {
   /// final value of each setting matters, and a buffer that grows with every
   /// call is a leak with a long drain behind it.
   private var resetBuffer: [Command]?
-  /// K1: forgetMe while the pipe was detached for a reset's drain. The erasure
-  /// could not go onto a pipe, so it waits here: the next `start` performs it on
-  /// its new pipe, or the reset, finding nobody started, wipes the store itself.
-  private var resetErasure = false
-  /// K19: how many `start`s have taken the reset buffer into their own hands
-  /// (and re-armed it for later arrivals). While one has, the reset's settle
-  /// leaves the buffer and the erasure alone: that start applies them on its
-  /// pipe, or hands them back if it defers or aborts.
-  private var resetClaims = 0
-  /// K20: the generation of a start that performed an erasure while a reset
-  /// drained. The old engine can still write behind that erasure; the settle
-  /// removes what it can write, if that start still owns the SDK.
-  private var erasedAtGeneration: Int?
   /// K25: moves on every forgetMe. A reset whose restart was claimed returns
   /// nil if an erasure landed after the claim.
   private var erasures = 0
+
+  /// The lifecycle owner (K27). `start`, `stop`, `forgetMe`, a reset taking
+  /// the pipe and a reset finishing (its restart and its settle) each run
+  /// whole under this lock, one at a time, never nested. Invariants, by
+  /// construction rather than by interleaving analysis:
+  /// - the reset buffer is consumed by exactly one party: the next `start` to
+  ///   install a pipe, or else the reset's settle (or `forgetMe`, which drops
+  ///   it). Each disarms it in the same operation that reads it.
+  /// - an erasure is applied by `forgetMe` itself, in full (stop, fence, wipe),
+  ///   before any later lifecycle operation can resolve an identity.
+  /// - no pipe is orphaned: a start cannot be superseded half-way.
+  /// App callbacks raised inside an operation are delivered after it (see
+  /// `deliver`), so a callback that calls back into the SDK cannot deadlock on
+  /// this (non-reentrant) lock. Lock order: `lifecycle`, then `lock`.
+  private let lifecycle = NSLock()
+  /// Callbacks held until the current lifecycle operation ends. Under `lock`.
+  private var heldCallbacks: [() -> Void]?
+  /// The store fence (K27), two rules (see `FencedStore`):
+  /// - the engine's own bookkeeping (queue, session, install flag, SKAN state)
+  ///   is written only by the engine holding `storeOwner`, moved by every
+  ///   `start` and `forgetMe`, so an engine still draining (or simply stopped)
+  ///   never writes it behind a newer instance;
+  /// - the app's settings (consent, consent data, user id) still land from an
+  ///   older engine, since they are the app's latest word, unless an erasure
+  ///   happened since that engine started (`erasures`).
+  /// Under `lock`.
+  private var storeOwner = 0
+  /// Set by `forgetMe` until the next start installs a pipe: settings made in
+  /// between go straight to the store, as the erased engine used to write them.
+  private var erased = false
+  /// Test surfaces: every pipe built, and every buffered setting applied.
+  var onPipeCreated: ((CommandPipe) -> Void)?
+  var onCarryApplied: ((Command) -> Void)?
 
   init(fallbackSink: (any AdvenueLogSink)? = nil) {
     self.fallbackSink = fallbackSink
@@ -317,11 +392,78 @@ final class FacadeState: @unchecked Sendable {
     secureStore: (any SecureStore)? = nil,
     resetPlan: ResetPlan? = nil
   ) -> Bool {
+    lifecycleOperation {
+      startLocked(
+        config, transport: transport, sources: sources, skan: skanReporter,
+        appVersion: readVersion, launchedInBackground: launchedInBackground, logSink: logSink,
+        advertisingSource: advertisingSource, deviceReset: deviceReset,
+        secureStore: secureStore, resetPlan: resetPlan)
+    }
+  }
+
+  /// Runs `body` as one lifecycle operation (see `lifecycle`). Never called
+  /// from inside one: the lock is not reentrant.
+  private func lifecycleOperation<T>(_ body: () -> T) -> T {
+    lifecycle.lock()
+    lock.lock()
+    heldCallbacks = []
+    lock.unlock()
+    let result = body()
+    lock.lock()
+    let held = heldCallbacks ?? []
+    heldCallbacks = nil
+    lock.unlock()
+    lifecycle.unlock()
+    for callback in held { callback() }
+    return result
+  }
+
+  /// An app callback: now, or after the lifecycle operation in progress. Never
+  /// called while holding `lock`.
+  private func deliver(_ callback: @escaping () -> Void) {
+    lock.lock()
+    if heldCallbacks != nil {
+      heldCallbacks?.append(callback)
+      lock.unlock()
+      return
+    }
+    lock.unlock()
+    callback()
+  }
+
+  /// Whether `token` still owns the store (the fence). Asked by engines.
+  private func ownsStore(_ token: Int) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return storeOwner == token
+  }
+
+  private func noErasure(since epoch: Int) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return erasures == epoch
+  }
+
+  /// `start`'s body. The caller holds `lifecycle`.
+  private func startLocked(
+    _ config: AdvenueConfig,
+    transport: (any EventTransport)?,
+    sources: EnrichmentSources?,
+    skan skanReporter: (any SkanReporter)?,
+    appVersion readVersion: @escaping () -> String?,
+    launchedInBackground: @escaping () -> Bool,
+    logSink: (any AdvenueLogSink)?,
+    advertisingSource: (@Sendable () -> AdvertisingSnapshot)?,
+    deviceReset: (any SandboxDeviceResetting)?,
+    secureStore: (any SecureStore)?,
+    resetPlan: ResetPlan?
+  ) -> Bool {
     // `resetInstall` restarts with exactly these arguments, so a reset app
     // runs with the same transport, sources and sinks it was started with.
     let requestedConfig = config
+    // Called by the reset's finish, inside its lifecycle operation.
     let restartArgs: (ResetPlan) -> Bool = { [weak self] plan in
-      self?.start(
+      self?.startLocked(
         requestedConfig, transport: transport, sources: sources, skan: skanReporter,
         appVersion: readVersion, launchedInBackground: launchedInBackground, logSink: logSink,
         advertisingSource: advertisingSource, deviceReset: deviceReset,
@@ -329,14 +471,12 @@ final class FacadeState: @unchecked Sendable {
     }
     let secure: any SecureStore = secureStore ?? KeychainStore()
 
-    // Replace-and-shut-down, never add: the same steps as `stop()`, in the
-    // same critical section as what follows.
+    // Replace-and-shut-down, never add: the same steps as `stop()`.
     lock.lock()
     if let plan = resetPlan {
-      // K5: a reset's restart claims the SDK here, under the lock that also
-      // stops it, so a shutdown() or re-initialize can land only wholly
-      // before (nothing restarts, the identity is kept) or wholly after (it
-      // stops the new instance). The identity rotates only once claimed.
+      // K5: a reset's restart claims the SDK only if nothing moved the
+      // generation while it drained; the lifecycle lock makes the claim, the
+      // identity rotation and this start one operation.
       guard generation == plan.expected, let oldStore = self.store, let oldSecure = self.secure
       else {
         lock.unlock()
@@ -347,14 +487,14 @@ final class FacadeState: @unchecked Sendable {
       resolvedDeviceId = nil
     }
     generation += 1
-    let ownGeneration = generation
     let replaced = detachLocked()
     // K23: nothing answers for the instance being replaced.
     resolvedDeviceId = nil
     startedConfig = nil
-    // K19: what a reset's drain buffered (and any erasure) now belongs to this
-    // start, not to the reset's settle.
-    let claimedCarry = claimResetCarryLocked()
+    // The fence: from here on only this start's engine writes the store.
+    storeOwner += 1
+    let storeToken = storeOwner
+    let erasureEpoch = erasures
     // Recorded before the identity gate, so a reset on a deferred launch
     // still knows the environment it was asked for (and says so).
     self.restart = restartArgs
@@ -369,10 +509,24 @@ final class FacadeState: @unchecked Sendable {
     replaced.cancel()
     replaced.pipe?.shutdown()
 
+    // The app's own callbacks go through `deliver`: the ones raised while this
+    // lifecycle operation runs reach the app after it.
+    let appSink: any AdvenueLogSink = logSink ?? UnifiedLogSink()
+    let deferredSink: any AdvenueLogSink = CallbackLogSink { [weak self] line in
+      guard let self else { return appSink.log(line) }
+      self.deliver { appSink.log(line) }
+    }
+    var deferredConfig = config
+    let appOnError = config.onError
+    deferredConfig.onError = { [weak self] context, error in
+      guard let self else { return appOnError(context, error) }
+      self.deliver { appOnError(context, error) }
+    }
+
     // `debug`: every swallowed failure goes through onError, so logging there
     // covers all of them — wrapped once, before anything below captures it.
-    let (debugConfig, log) = withDebugLogging(config, sink: logSink)
-    let config = withSandboxNotices(debugConfig, sink: logSink)
+    let (debugConfig, log) = withDebugLogging(deferredConfig, sink: deferredSink)
+    let config = withSandboxNotices(debugConfig, sink: deferredSink)
 
     // Clamped early and said so: a caller passing 600 must learn the wait is
     // 120. Before the Keychain gate, so it reports on every launch —
@@ -412,12 +566,8 @@ final class FacadeState: @unchecked Sendable {
       // Deferred: the Keychain could not be read. Nothing is minted and
       // nothing starts, so no event carries an invented identifier. The next
       // launch after first unlock resolves it.
+      // A reset buffer stays armed: the reset's settle writes it to the store.
       config.onError("identity.deferred", AdvenueSetupError.identityDeferred)
-      if let claimedCarry {
-        lock.lock()
-        releaseResetCarryLocked(claimedCarry, store: store, secure: secure)
-        lock.unlock()
-      }
       return true
     }
 
@@ -440,8 +590,11 @@ final class FacadeState: @unchecked Sendable {
           // A key pasted from the wrong app is otherwise silent.
           if acceptedAppId.set(appId) { log("[Advenue] ingesting into app \(appId)") }
         })
-    let eventTransport: any EventTransport =
-      config.debug ? LoggingTransport(inner: baseTransport, log: log) : baseTransport
+    // K27: nothing is uploaded behind an erasure, not even by an engine still
+    // draining what it queued before.
+    let eventTransport: any EventTransport = FencedTransport(
+      inner: config.debug ? LoggingTransport(inner: baseTransport, log: log) : baseTransport,
+      allowed: { [weak self] in self?.noErasure(since: erasureEpoch) ?? false })
 
     let engine = AdvenueEngine(
       config: EngineConfig(
@@ -452,10 +605,18 @@ final class FacadeState: @unchecked Sendable {
         requireConsent: config.requireConsent, sessionWindowMs: config.sessionWindowMs,
         batchSize: config.batchSize, piiScrubEnabled: config.piiScrubEnabled,
         attStatus: AdvertisingIdentity().status.rawValue),
-      store: store, clock: SystemClock(), scheduler: scheduler, uuid: uuid,
+      store: FencedStore(
+        inner: store,
+        canWriteSettings: { [weak self] in self?.noErasure(since: erasureEpoch) ?? false },
+        canWriteBookkeeping: { [weak self] in self?.ownsStore(storeToken) ?? false }),
+      clock: SystemClock(), scheduler: scheduler, uuid: uuid,
       transport: eventTransport,
       onError: config.onError)
     let pipe = CommandPipe(engine: engine, onError: config.onError)
+    lock.lock()
+    let pipeObserver = onPipeCreated
+    lock.unlock()
+    pipeObserver?(pipe)
 
     // Armed only when there are rules to evaluate. The reporter is injectable
     // for the same reason the transport is: an unwired one is invisible, and
@@ -502,16 +663,6 @@ final class FacadeState: @unchecked Sendable {
     }
 
     lock.lock()
-    // K5: stopped or replaced while this start ran: the instance that replaced
-    // it owns the SDK, and this one must not come alive behind it.
-    guard generation == ownGeneration else {
-      if let claimedCarry {
-        releaseResetCarryLocked(claimedCarry, store: store, secure: secure)
-      }
-      lock.unlock()
-      pipe.shutdown()
-      return true
-    }
     self.store = store
     self.secure = secure
     if let advertisingSource { self.advertisingSource = advertisingSource }
@@ -521,22 +672,15 @@ final class FacadeState: @unchecked Sendable {
     self.consentDataMirror = readPersistedConsentData(store)
     self.pipe = pipe
     self.startedConfig = config
-    // K1/K19: the carry this start claimed, plus whatever arrived while it
-    // ran. An erasure goes first, on this pipe, exactly as `forgetMe` would
-    // have done on a running SDK; then what the app set, in order, ahead of
-    // the install (F13), reflected in the getters the store just reseeded.
-    var carry = claimedCarry ?? ResetCarry(commands: [], erase: false)
-    if claimedCarry != nil { resetClaims -= 1 }
-    mergeArrivalsLocked(into: &carry)
+    // F13: what the app set while a reset drained goes onto this pipe, in
+    // order, ahead of the install, reflected in the getters the store just
+    // reseeded. Read and disarmed here, inside this lifecycle operation, so it
+    // is applied exactly once.
+    erased = false
+    let carried = resetBuffer ?? []
     resetBuffer = nil
-    resetErasure = false
-    if carry.erase {
-      applyErasureLocked(pipe: pipe, store: store, secure: secure)
-      // K20: the old engine may still be draining and can write behind this.
-      if resetting { erasedAtGeneration = ownGeneration }
-    }
-    for command in carry.commands { applySettingLocked(command, pipe: pipe) }
-    self.resolvedDeviceId = carry.erase ? nil : deviceId
+    for command in carried { applySettingLocked(command, pipe: pipe) }
+    self.resolvedDeviceId = deviceId
     let buffered = pendingDeepLinks
     pendingDeepLinks = []
     lock.unlock()
@@ -628,96 +772,15 @@ final class FacadeState: @unchecked Sendable {
     return true
   }
 
-  /// A reset drain's buffered settings and erasure, taken out of the shared
-  /// state by one owner (K19).
-  struct ResetCarry {
-    var commands: [Command]
-    var erase: Bool
-  }
-
-  /// Takes the armed reset buffer and erasure for the calling start, and
-  /// re-arms an empty buffer for what arrives while it runs. Caller holds `lock`.
-  private func claimResetCarryLocked() -> ResetCarry? {
-    guard let armed = resetBuffer else { return nil }
-    let carry = ResetCarry(commands: armed, erase: resetErasure)
-    resetBuffer = []
-    resetErasure = false
-    resetClaims += 1
-    return carry
-  }
-
-  /// Folds in what reached the shared buffer after `carry` was taken. A newer
-  /// erasure has already emptied the buffer of what preceded it, so it drops
-  /// the carried settings too. Caller holds `lock`.
-  private func mergeArrivalsLocked(into carry: inout ResetCarry) {
-    let arrivals = resetBuffer ?? []
-    if resetErasure {
-      carry = ResetCarry(commands: arrivals, erase: true)
-    } else {
-      carry.commands = Self.coalesced(carry.commands + arrivals)
-    }
-  }
-
-  /// One of each setting, in the order of the last write (K2).
-  private static func coalesced(_ commands: [Command]) -> [Command] {
-    var out: [Command] = []
-    for command in commands {
-      let kind = settingKind(command)
-      out.removeAll { settingKind($0) == kind }
-      out.append(command)
-    }
-    return out
-  }
-
-  /// What `forgetMe` does to a live pipe and the state around it. Caller holds `lock`.
-  private func applyErasureLocked(
-    pipe: CommandPipe, store: any KeyValueStore, secure: any SecureStore
-  ) {
-    pipe.submit(.forgetMe)
-    consentMirror = false
-    consentDataMirror = nil
-    resolvedDeviceId = nil
-    secure.delete(DEVICE_ID_KEY)
-    store.removeObject(forKey: INSTALLATION_ID_KEY)
-    store.removeObject(forKey: INSTALL_SENT_KEY)
-  }
-
   /// A carried setting, onto a live pipe and into the getters. Caller holds `lock`.
   private func applySettingLocked(_ command: Command, pipe: CommandPipe) {
+    onCarryApplied?(command)
     switch command {
     case .setConsent(let granted): consentMirror = granted
     case .setConsentData(let consent): consentDataMirror = consent
     default: break
     }
     pipe.submit(command)
-  }
-
-  /// A start that claimed the carry but will not install its pipe (identity
-  /// deferred, or stopped meanwhile) hands it on: to the pipe that now runs, to
-  /// the reset still draining, or, with nobody left to take it, to the store.
-  /// Caller holds `lock`.
-  private func releaseResetCarryLocked(
-    _ claimed: ResetCarry, store: any KeyValueStore, secure: any SecureStore
-  ) {
-    resetClaims -= 1
-    var carry = claimed
-    mergeArrivalsLocked(into: &carry)
-    if let pipe {
-      resetBuffer = nil
-      resetErasure = false
-      if carry.erase {
-        applyErasureLocked(pipe: pipe, store: self.store ?? store, secure: self.secure ?? secure)
-      }
-      for command in carry.commands { applySettingLocked(command, pipe: pipe) }
-    } else if resetting {
-      resetBuffer = carry.commands
-      resetErasure = carry.erase
-    } else {
-      resetBuffer = nil
-      resetErasure = false
-      if carry.erase { Self.eraseStored(store: store, secure: secure) }
-      for command in carry.commands { persistSettingCommand(command, to: store) }
-    }
   }
 
   /// The erasure, written straight to the stores (no engine is left to run it).
@@ -747,8 +810,14 @@ final class FacadeState: @unchecked Sendable {
     let commands = expand(command)
     lock.lock()
     defer { lock.unlock() }
-    if pipe == nil, resetBuffer != nil, Self.survivesReset(command) {
-      bufferForResetLocked(command)
+    if pipe == nil, Self.survivesReset(command) {
+      if resetBuffer != nil {
+        bufferForResetLocked(command)
+      } else if erased, let store {
+        // After forgetMe, until the next start: what the erased engine
+        // used to persist, persisted here.
+        persistSettingCommand(command, to: store)
+      }
       return
     }
     guard let pipe else { return }
@@ -847,32 +916,38 @@ final class FacadeState: @unchecked Sendable {
   /// the durable device id lives in the Keychain and is wiped here. Calling
   /// only the engine's `forgetMe` is the layering trap the spec recorded — an
   /// erasure that leaves the identifier behind, and looks finished.
+  ///
+  /// One lifecycle operation: the SDK stops (an erased engine records nothing
+  /// anyway), the store fence moves so no engine, running or draining, writes
+  /// behind the erasure, and the stores are wiped here, before any later
+  /// operation can resolve an identity. A reset buffer is dropped with
+  /// everything else; settings made afterwards, until the next start, go
+  /// straight to the store.
   func forgetMe() {
-    lock.lock()
-    if let pipe {
-      pipe.submit(.forgetMe)
-    } else if resetBuffer != nil {
-      // K1: a reset is draining with the pipe detached, so there is no pipe to
-      // put the erasure on. Recorded instead, and what was buffered for the
-      // next pipe is erased with it.
-      resetBuffer = []
-      resetErasure = true
+    lifecycleOperation {
+      lock.lock()
+      // F14: a reset waiting on the server or the drain must not restart an
+      // erased SDK under a fresh identity.
+      generation += 1
+      erasures += 1
+      storeOwner += 1
+      let detached = detachLocked()
+      resetBuffer = nil
+      erased = true
+      // Erasure clears the read caches too: a getter still answering
+      // "granted" after forgetMe would report a consent the device no longer
+      // holds.
+      consentMirror = false
+      consentDataMirror = nil
+      resolvedDeviceId = nil
+      startedConfig = nil
+      if let store, let secure { Self.eraseStored(store: store, secure: secure) }
+      lock.unlock()
+      detached.cancel()
+      // The engine clears its memory; its store writes are fenced off.
+      detached.pipe?.submit(.forgetMe)
+      detached.pipe?.shutdown()
     }
-    // F14: a reset waiting on the server must not restart an erased SDK under
-    // a fresh identity.
-    generation += 1
-    erasures += 1
-    // Erasure clears the read caches too: a getter still answering "granted"
-    // after forgetMe would report a consent the device no longer holds.
-    consentMirror = false
-    consentDataMirror = nil
-    let secure = self.secure
-    let store = self.store
-    resolvedDeviceId = nil
-    lock.unlock()
-    secure?.delete(DEVICE_ID_KEY)
-    store?.removeObject(forKey: INSTALLATION_ID_KEY)
-    store?.removeObject(forKey: INSTALL_SENT_KEY)
   }
 
   /// Everything `resetInstall` reads from this state, snapshotted at once.
@@ -945,6 +1020,10 @@ final class FacadeState: @unchecked Sendable {
   /// arrives during the drain is buffered and replayed by the next start, so
   /// it reaches the new install.
   private func takePipeForReset(generation expected: Int) -> CommandPipe? {
+    lifecycleOperation { takePipeForResetLocked(generation: expected) }
+  }
+
+  private func takePipeForResetLocked(generation expected: Int) -> CommandPipe? {
     lock.lock()
     guard generation == expected, let pipe = self.pipe else {
       lock.unlock()
@@ -978,37 +1057,27 @@ final class FacadeState: @unchecked Sendable {
     secure.write(mintedDeviceId, forKey: DEVICE_ID_KEY)
   }
 
-  /// After the restart (claimed or not): what the drain buffered and no start
-  /// took (a stop meanwhile, or a restart that deferred identity) is written
-  /// to the store, so the next start loads it (K3). An erasure recorded during
-  /// the drain and not performed by a start wipes the store first (K1). The
-  /// old engine has drained, so nothing writes behind this.
-  ///
-  /// K19: a start that claimed the buffer owns it; the settle then touches
-  /// neither the buffer nor the store, and ends the reset so that start, if it
-  /// later hands the buffer back, writes it to the store itself. K20: if a
-  /// start performed an erasure during this drain and still owns the SDK, what
-  /// the old engine could have written behind it is removed (the erased engine
-  /// never writes these keys).
-  private func settleResetBuffer(store: any KeyValueStore, secure: any SecureStore) {
-    lock.lock()
-    defer { lock.unlock() }
-    resetting = false
-    if let erased = erasedAtGeneration {
-      erasedAtGeneration = nil
-      if erased == generation {
-        for key in [QUEUE_KEY, INSTALL_SENT_KEY, SESSION_STATE_KEY] {
-          (self.store ?? store).removeObject(forKey: key)
-        }
+  /// After the drain, one lifecycle operation: the restart (which claims the
+  /// SDK only if nothing moved the generation) and then the settle: what the
+  /// drain buffered and no start took (a stop meanwhile, a restart that
+  /// deferred identity) is written to the store, so the next start loads it
+  /// (K3). The old engine has drained, and the fence keeps it from writing
+  /// behind anyone, so nothing writes behind this.
+  private func finishReset(_ target: ResetTarget, minted: String) -> Bool {
+    lifecycleOperation {
+      let claimed = target.restart(
+        ResetPlan(expected: target.generation, mintedDeviceId: minted))
+      lock.lock()
+      resetting = false
+      let carried = resetBuffer ?? []
+      resetBuffer = nil
+      for command in carried {
+        onCarryApplied?(command)
+        persistSettingCommand(command, to: target.store)
       }
+      lock.unlock()
+      return claimed
     }
-    guard resetClaims == 0 else { return }
-    let carried = resetBuffer ?? []
-    let erase = resetErasure
-    resetBuffer = nil
-    resetErasure = false
-    if erase { Self.eraseStored(store: store, secure: secure) }
-    for command in carried { persistSettingCommand(command, to: store) }
   }
 
   private var erasureCount: Int {
@@ -1058,7 +1127,10 @@ final class FacadeState: @unchecked Sendable {
         deviceId: target.deviceId,
         installationId: target.store.string(forKey: INSTALLATION_ID_KEY))
     } catch {
-      target.config.onError("resetInstall.server", error)
+      // K31: the app (and the debug logger, which prints what onError gets)
+      // receive the id-free description, with the original kept underneath.
+      target.config.onError(
+        "resetInstall.server", ResetServerError(description: Self.idFree(error), underlying: error))
       target.sink.log(
         "Advenue: resetInstall() could not reset the server state (\(Self.idFree(error))); "
           + "continuing locally.")
@@ -1069,9 +1141,7 @@ final class FacadeState: @unchecked Sendable {
     // 3. A fresh start claims the SDK, rotates the ids and records the install.
     let minted = SystemUUIDs().next()
     let erasuresBefore = erasureCount
-    let claimed = target.restart(
-      ResetPlan(expected: target.generation, mintedDeviceId: minted))
-    settleResetBuffer(store: target.store, secure: target.secure)
+    let claimed = finishReset(target, minted: minted)
     guard claimed else { return nil }
     // K25: erased after the claim: the minted id is gone with everything else.
     guard erasureCount == erasuresBefore else { return nil }
@@ -1315,17 +1385,19 @@ final class FacadeState: @unchecked Sendable {
   }
 
   func stop() {
-    lock.lock()
-    // A reset waiting on the server or the drain must not revive what this stops.
-    generation += 1
-    let detached = detachLocked()
-    // K23: a stopped SDK answers for no device: deviceId() is nil and the
-    // deferred-deep-link lookup does not poll.
-    resolvedDeviceId = nil
-    startedConfig = nil
-    lock.unlock()
-    detached.cancel()
-    detached.pipe?.shutdown()
+    lifecycleOperation {
+      lock.lock()
+      // A reset waiting on the server or the drain must not revive what this stops.
+      generation += 1
+      let detached = detachLocked()
+      // K23: a stopped SDK answers for no device: deviceId() is nil and the
+      // deferred-deep-link lookup does not poll.
+      resolvedDeviceId = nil
+      startedConfig = nil
+      lock.unlock()
+      detached.cancel()
+      detached.pipe?.shutdown()
+    }
   }
 
   /// Test surface: whether a pipe is live.
