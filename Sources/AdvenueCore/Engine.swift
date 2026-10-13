@@ -476,6 +476,21 @@ public actor AdvenueEngine {
     }
   }
 
+  /// Spec 3 §7: the local half of `resetInstall()`. Like `forgetMe` but not an
+  /// erasure: consent and the customer user id stay. Ordered on the pipe, so a
+  /// command queued before it cannot write the old queue back afterwards; the
+  /// engine then refuses further work and the facade starts a fresh one.
+  public func resetInstallState() {
+    forgotten = true
+    releaseInstallHold()
+    queue.clear()
+    sessions.reset()
+    // QUEUE_KEY last, for the reason `forgetMe` gives.
+    for key in [SESSION_STATE_KEY, INSTALL_SENT_KEY, QUEUE_KEY] {
+      store.removeObject(forKey: key)
+    }
+  }
+
   public func notifyForeground() {
     let events = sessions.handleForeground()
     for event in events {
@@ -604,6 +619,8 @@ public enum Command: Sendable {
   case setConsent(Bool)
   case setUserId(String?)
   case forgetMe
+  /// Sandbox only: the local half of `resetInstall()`.
+  case resetInstall
   case foreground
   case background
   case flush
@@ -673,6 +690,8 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setUserId(id)
     case .forgetMe:
       await engine.forgetMe()
+    case .resetInstall:
+      await engine.resetInstallState()
     case .foreground:
       await engine.notifyForeground()
     case .background:
@@ -719,6 +738,15 @@ public final class CommandPipe: @unchecked Sendable {
   public func shutdown() {
     continuation.finish()
     consumer = nil
+  }
+
+  /// Finishes the stream and waits until every command already submitted has
+  /// run (resetInstall must not race a pending write of the old queue).
+  public func shutdownAndWait() async {
+    let task = consumer
+    continuation.finish()
+    consumer = nil
+    await task?.value
   }
 }
 

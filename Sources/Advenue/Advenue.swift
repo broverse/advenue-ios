@@ -114,6 +114,13 @@ public enum Advenue {
   /// Erasure. Spans both stores — see `FacadeState.forgetMe`.
   public static func forgetMe() { state.forgetMe() }
 
+  /// Sandbox only (spec 3 §7): makes this device a new install without
+  /// reinstalling the app. Asks the server to clear the device's sandbox state,
+  /// clears the queue, session, install flag and installation id, rotates the
+  /// device id, and records a new install. Consent and the user id stay.
+  /// Returns the new device id; in production it logs and returns nil.
+  public static func resetInstall() async -> String? { await state.resetInstall() }
+
   /// The device identifier, or nil while identity is deferred.
   ///
   /// Async because resolution can be deferred while the Keychain is locked. A
@@ -163,6 +170,10 @@ public enum Advenue {
 
   public static func shutdown() { state.stop() }
 }
+
+/// What `resetInstall()` logs, and all it does, outside the sandbox: a
+/// production app must not mint "new" installs.
+let RESET_INSTALL_PRODUCTION_LOG = "Advenue: resetInstall() works only in sandbox."
 
 /// Thread-safe holder for the app the server reported. Diagnostics only.
 final class AcceptedAppId: @unchecked Sendable {
@@ -227,6 +238,11 @@ final class FacadeState: @unchecked Sendable {
   /// value it just replaced.
   private var consentMirror = false
   private var consentDataMirror: Consent?
+  /// What `resetInstall` needs to start again exactly as the app did.
+  private var restart: (() -> Void)?
+  private var requestedConfig: AdvenueConfig?
+  private var deviceReset: (any SandboxDeviceResetting)?
+  private var noticeSink: (any AdvenueLogSink)?
 
   /// `transport` is a parameter, not a hidden construction, because an unwired
   /// transport is otherwise invisible: every component of the send path can be
@@ -236,13 +252,24 @@ final class FacadeState: @unchecked Sendable {
     transport: (any EventTransport)? = nil,
     sources: EnrichmentSources? = nil,
     skan skanReporter: (any SkanReporter)? = nil,
-    appVersion readVersion: () -> String? = readAppVersion,
-    launchedInBackground: () -> Bool = readLaunchedInBackground,
+    appVersion readVersion: @escaping () -> String? = readAppVersion,
+    launchedInBackground: @escaping () -> Bool = readLaunchedInBackground,
     logSink: (any AdvenueLogSink)? = nil,
-    advertisingSource: (@Sendable () -> AdvertisingSnapshot)? = nil
+    advertisingSource: (@Sendable () -> AdvertisingSnapshot)? = nil,
+    deviceReset: (any SandboxDeviceResetting)? = nil
   ) {
     // Replace-and-shut-down, never add.
     stop()
+
+    // `resetInstall` restarts with exactly these arguments, so a reset app
+    // runs with the same transport, sources and sinks it was started with.
+    let requestedConfig = config
+    let restartArgs: () -> Void = { [weak self] in
+      self?.start(
+        requestedConfig, transport: transport, sources: sources, skan: skanReporter,
+        appVersion: readVersion, launchedInBackground: launchedInBackground, logSink: logSink,
+        advertisingSource: advertisingSource, deviceReset: deviceReset)
+    }
 
     // `debug`: every swallowed failure goes through onError, so logging there
     // covers all of them — wrapped once, before anything below captures it.
@@ -382,6 +409,14 @@ final class FacadeState: @unchecked Sendable {
     self.consentDataMirror = readPersistedConsentData(store)
     self.pipe = pipe
     self.resolvedDeviceId = deviceId
+    self.restart = restartArgs
+    self.requestedConfig = requestedConfig
+    self.noticeSink = logSink
+    self.deviceReset =
+      deviceReset
+      ?? HttpSandboxDeviceReset(
+        endpoint: requestedConfig.endpoint, apiKey: requestedConfig.apiKey,
+        signingSecret: requestedConfig.signingSecret)
     let buffered = pendingDeepLinks
     pendingDeepLinks = []
     lock.unlock()
@@ -541,6 +576,75 @@ final class FacadeState: @unchecked Sendable {
     secure?.delete(DEVICE_ID_KEY)
     store?.removeObject(forKey: INSTALLATION_ID_KEY)
     store?.removeObject(forKey: INSTALL_SENT_KEY)
+  }
+
+  /// Everything `resetInstall` reads from this state, snapshotted at once.
+  private struct ResetTarget {
+    let config: AdvenueConfig
+    let restart: () -> Void
+    let store: any KeyValueStore
+    let secure: any SecureStore
+    let deviceId: String
+    let resetter: (any SandboxDeviceResetting)?
+    let sink: any AdvenueLogSink
+  }
+
+  /// Synchronous for the reason `lookupTarget` is: NSLock is unavailable from
+  /// an async context in Swift 6 mode (PF24).
+  private func resetTarget() -> ResetTarget? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let config = requestedConfig, let restart, let store, let secure,
+      let deviceId = resolvedDeviceId
+    else { return nil }
+    return ResetTarget(
+      config: config, restart: restart, store: store, secure: secure, deviceId: deviceId,
+      resetter: deviceReset, sink: noticeSink ?? UnifiedLogSink())
+  }
+
+  /// The identity half of the local reset, once the engine has drained: the
+  /// next start mints a new device id and installation id. The old
+  /// installation's SKAN state goes too: it is keyed by that id, so nothing
+  /// would read it again, and a reset should not leave an orphan behind.
+  private func forgetInstallIdentity(store: any KeyValueStore, secure: any SecureStore) {
+    if let installationId = store.string(forKey: INSTALLATION_ID_KEY) {
+      store.removeObject(forKey: skanStateKey(installationId: installationId))
+    }
+    store.removeObject(forKey: INSTALLATION_ID_KEY)
+    secure.delete(DEVICE_ID_KEY)
+    lock.lock()
+    pendingDeepLinks = []
+    resolvedDeviceId = nil
+    lock.unlock()
+  }
+
+  /// Spec 3 §7. See `Advenue.resetInstall()`.
+  func resetInstall() async -> String? {
+    guard let target = resetTarget() else { return nil }
+    // P6: a production app must not mint "new" installs.
+    guard target.config.environment == .sandbox else {
+      target.sink.log(RESET_INSTALL_PRODUCTION_LOG)
+      return nil
+    }
+    // 1. Server: clear the old device's sandbox state. A 404 from an older
+    //    server (or any failure, 429 included) is logged; the local reset goes
+    //    on — the new device id alone gives the next install fresh continuity.
+    do {
+      try await target.resetter?.reset(
+        deviceId: target.deviceId,
+        installationId: target.store.string(forKey: INSTALLATION_ID_KEY))
+    } catch {
+      target.config.onError("resetInstall.server", error)
+      target.sink.log(
+        "Advenue: resetInstall() could not reset the server state (\(error)); continuing locally.")
+    }
+    // 2. Local: ordered behind every queued command, then wait for the pipe.
+    submit(.resetInstall)
+    await detach()?.shutdownAndWait()
+    forgetInstallIdentity(store: target.store, secure: target.secure)
+    // 3. A fresh start mints the ids and records the install.
+    target.restart()
+    return currentDeviceId
   }
 
   /// Synchronous internally: NSLock cannot be held across an async boundary,
@@ -738,7 +842,8 @@ final class FacadeState: @unchecked Sendable {
     }
   }
 
-  func stop() {
+  /// Cancels timers, observers and the install task; detaches the pipe.
+  private func detach() -> CommandPipe? {
     lock.lock()
     let pipe = self.pipe
     let timer = flushTimer
@@ -757,6 +862,10 @@ final class FacadeState: @unchecked Sendable {
     timer?.cancel()
     install?.cancel()
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
-    pipe?.shutdown()
+    return pipe
+  }
+
+  func stop() {
+    detach()?.shutdown()
   }
 }

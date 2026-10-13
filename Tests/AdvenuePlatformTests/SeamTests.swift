@@ -49,6 +49,21 @@ actor RecordingSkanReporter: SkanReporter {
   }
 }
 
+/// Records what resetInstall asked the server to clear; can answer like an old server.
+actor RecordingDeviceReset: SandboxDeviceResetting {
+  struct Call: Sendable, Equatable {
+    let deviceId: String
+    let installationId: String?
+  }
+  private(set) var calls: [Call] = []
+  private let status: Int?
+  init(failingWith status: Int? = nil) { self.status = status }
+  func reset(deviceId: String, installationId: String?) async throws {
+    calls.append(Call(deviceId: deviceId, installationId: installationId))
+    if let status { throw IngestError(status: status) }
+  }
+}
+
 /// The test the component suites could not fail.
 ///
 /// Every piece of the send path had its own passing test — `HttpTransport.send`,
@@ -794,6 +809,144 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(
       event?.properties?["email"], .string("a@b.com"),
       "an explicit opt-out must leave properties untouched")
+  }
+
+  // MARK: resetInstall (spec 3 §7)
+
+  func testResetInstallIsANoOpInProduction() async throws {
+    let sink = RecordingLogSink()
+    let recorder = RecordingDeviceReset()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink,
+      deviceReset: recorder)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let before = state.currentDeviceId
+    let result = await state.resetInstall()
+    XCTAssertNil(result)
+    XCTAssertEqual(state.currentDeviceId, before)
+    XCTAssertTrue(
+      sink.lines.contains("Advenue: resetInstall() works only in sandbox."), "\(sink.lines)")
+    let calls = await recorder.calls
+    XCTAssertTrue(calls.isEmpty)
+  }
+
+  func testResetInstallInSandboxRotatesTheDeviceAndSendsANewInstall() async throws {
+    let transport = RecordingEventTransport()
+    let recorder = RecordingDeviceReset()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, sources: Self.settledSources, deviceReset: recorder)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = try XCTUnwrap(state.currentDeviceId)
+    let oldInstallation = UserDefaults(suiteName: ADVENUE_SUITE)?.string(
+      forKey: INSTALLATION_ID_KEY)
+    // Queued but never flushed: must not survive the reset.
+    state.submit(.track(name: "before_reset", properties: nil, type: "custom"))
+
+    let new = await state.resetInstall()
+    XCTAssertNotNil(new)
+    XCTAssertNotEqual(new, old)
+    let calls = await recorder.calls
+    XCTAssertEqual(
+      calls, [RecordingDeviceReset.Call(deviceId: old, installationId: oldInstallation)])
+
+    state.submit(.flush)
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.type == "install" && $0.deviceId == new }
+    }
+    let names = await transport.events.map(\.name)
+    XCTAssertFalse(names.contains("before_reset"), "\(names)")
+  }
+
+  func testResetInstallContinuesWhenTheServerIsOld() async throws {
+    let sink = RecordingLogSink()
+    let recorder = RecordingDeviceReset(failingWith: 404)
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: RecordingTransport(), sources: Self.settledSources, logSink: sink,
+      deviceReset: recorder)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let old = state.currentDeviceId
+    let new = await state.resetInstall()
+    XCTAssertNotNil(new)
+    XCTAssertNotEqual(new, old)
+    // The 404 is said, not swallowed.
+    XCTAssertTrue(
+      sink.lines.contains { $0.contains("resetInstall()") && $0.contains("404") },
+      "\(sink.lines)")
+  }
+
+  /// PF29: the native SDK persists no conversion data (the server's `sbx:conv`
+  /// is the only cache, and the endpoint deletes it), so the local reset is
+  /// exactly: install flag, installation id, queue and session go; consent, the
+  /// user id and the environment stay.
+  func testResetInstallClearsTheInstallButKeepsConsentUserAndEnvironment() async throws {
+    // Sendable, unlike UserDefaults, so the polling closure can read it.
+    let defaults = UserDefaultsStore()
+    let files = try XCTUnwrap(CacheFileStore.caches())
+    let store = CompositeStore(files: files)
+    defer {
+      defaults.removeObject(forKey: CONSENT_KEY)
+      defaults.removeObject(forKey: USER_ID_KEY)
+      store.removeObject(forKey: QUEUE_KEY)
+    }
+    // This device already sent its install, so the first launch owes nothing.
+    // The environment is seeded too: a changed one would itself clear the flag.
+    defaults.set(AdvenueEnvironment.sandbox.rawValue, forKey: ENVIRONMENT_KEY)
+    defaults.set("1", forKey: INSTALL_SENT_KEY)
+    // The new install's enrichment is held back, so nothing re-writes the keys
+    // between the reset and the assertions below.
+    let slowSources = EnrichmentSources(
+      searchAdsToken: {
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        return nil
+      },
+      advertisingId: { (idfa: nil, vendorId: nil) },
+      appInstanceId: { nil })
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", environment: .sandbox)
+    config.flushIntervalMs = 0
+    state.start(
+      config, transport: RecordingTransport(), sources: slowSources,
+      launchedInBackground: { true }, deviceReset: RecordingDeviceReset())
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    let oldInstallation = try XCTUnwrap(defaults.string(forKey: INSTALLATION_ID_KEY))
+
+    state.submit(.setConsent(true))
+    state.submit(.setUserId("user-1"))
+    state.notifyForeground()
+    state.submit(.track(name: "queued", properties: nil, type: "custom"))
+    // No flush: the queue must still be on disk when the reset runs.
+    try await Self.until(timeout: 5) {
+      defaults.string(forKey: SESSION_STATE_KEY) != nil
+        && defaults.string(forKey: USER_ID_KEY) == "user-1"
+        && store.string(forKey: QUEUE_KEY) != nil
+    }
+
+    XCTAssertEqual(defaults.string(forKey: INSTALL_SENT_KEY), "1", "precondition")
+    // The one on-device conversion value: SKAN's per-installation state. Keyed
+    // by the old installation id, so the new install would never read it; the
+    // reset still removes it rather than leave an orphan behind.
+    let oldSkanState = skanStateKey(installationId: oldInstallation)
+    defaults.set("{}", forKey: oldSkanState)
+
+    _ = await state.resetInstall()
+
+    XCTAssertNil(defaults.string(forKey: oldSkanState), "skan state")
+    XCTAssertNil(defaults.string(forKey: INSTALL_SENT_KEY), "install_sent")
+    XCTAssertNotEqual(
+      defaults.string(forKey: INSTALLATION_ID_KEY), oldInstallation, "installation_id")
+    XCTAssertNil(store.string(forKey: QUEUE_KEY), "queue")
+    XCTAssertNil(defaults.string(forKey: SESSION_STATE_KEY), "session")
+    XCTAssertEqual(defaults.string(forKey: CONSENT_KEY), "granted", "consent")
+    XCTAssertEqual(defaults.string(forKey: USER_ID_KEY), "user-1", "user_id")
+    XCTAssertEqual(defaults.string(forKey: ENVIRONMENT_KEY), "sandbox", "environment")
   }
 }
 

@@ -15,6 +15,9 @@ stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 - Switching environments between launches drops the queued events of the old
   environment and records a new install; device and installation ids are kept.
 - Production batches are byte-identical to 1.3.0.
+- `Advenue.resetInstall()` (sandbox only): a new install without reinstalling
+  the app. Needs an ingestion server with `/v1/sandbox/reset-device`; an older
+  server answers 404, which is logged, and the local reset still happens.
 
 ## 1.3.0 (2026-10-12)
 
