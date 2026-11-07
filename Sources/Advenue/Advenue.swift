@@ -283,6 +283,11 @@ final class FacadeState: @unchecked Sendable {
   /// it can outlive the instance that started it by up to two minutes, and a
   /// wait that finishes into a replaced pipe submits to nobody — or worse.
   private var installTask: Task<Void, Never>?
+  /// F7: the install's attestation, skipped because consent was withheld,
+  /// armed to run on the pipe's next grant.
+  private var attestationOnConsent:
+    (attest: @Sendable () async -> (challenge: String, result: AttestationResult)?,
+      pipe: CommandPipe)?
   /// Where the flush/foreground refresh reads the advertising identity.
   /// Production reads the system; tests script "the user answered between
   /// init and flush". Under the lock like everything else here.
@@ -729,7 +734,7 @@ final class FacadeState: @unchecked Sendable {
     // Enrichment, then the install, off the caller's thread. `initialize`
     // returns synchronously — an SDK that blocks
     // didFinishLaunchingWithOptions for three seconds is one nobody ships.
-    let installSources =
+    let installSourcesUngated =
       sources
       ?? EnrichmentSources.system(
         appInstanceIdProvider: currentAppInstanceIdProvider,
@@ -746,6 +751,19 @@ final class FacadeState: @unchecked Sendable {
           else { return nil }
           return (challenge: challenge, result: result)
         })
+    // F7 (spec D7): the attestation's challenge fetch carries the device id,
+    // so under requireConsent it does not run before consent. Skipped, it is
+    // armed to run when consent is granted, and the engine holds the install
+    // for it (see `submit`).
+    var installSources = installSourcesUngated
+    if config.requireConsent {
+      let attestNow = installSourcesUngated.attestation
+      installSources.attestation = { [weak self] in
+        guard let self else { return nil }
+        if self.deferAttestationUntilConsent(attestNow, pipe: pipe) { return nil }
+        return await attestNow()
+      }
+    }
     // Whether the wait runs at all is decided up front, from the same flag
     // the engine guards on: a launch that already sent its install never
     // waits, whatever the interval says.
@@ -771,6 +789,40 @@ final class FacadeState: @unchecked Sendable {
     }
     lock.unlock()
     return true
+  }
+
+  /// F7: whether the install's attestation must wait for consent. Decided
+  /// against the consent mirror under `lock`, the same section `submit` takes
+  /// the armed attestation in, so a grant racing this either sees it armed or
+  /// is seen here as granted. Returns true when the attestation was skipped.
+  private func deferAttestationUntilConsent(
+    _ attest: @escaping @Sendable () async -> (challenge: String, result: AttestationResult)?,
+    pipe: CommandPipe
+  ) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if consentMirror { return false }
+    // A replaced pipe's install flow is cancelled; it attests nothing.
+    guard self.pipe === pipe else { return true }
+    attestationOnConsent = (attest, pipe)
+    pipe.submit(.awaitInstallAttestation(holdMs: INSTALL_WINDOW_MS + INSTALL_HOLD_MARGIN_MS))
+    return true
+  }
+
+  /// F7: runs the attestation consent held back and releases the deferred
+  /// install with it, onto the pipe the install is waiting on. Bounded like
+  /// enrichment: an install held for attestation is an install lost.
+  private static func attestAfterConsent(
+    _ attest: @escaping @Sendable () async -> (challenge: String, result: AttestationResult)?,
+    pipe: CommandPipe
+  ) {
+    Task {
+      let attested = await withDeadline(ms: INSTALL_WINDOW_MS, { await attest() }) ?? nil
+      pipe.submit(
+        .releaseDeferredInstall(
+          attestation: attested?.result, attestationChallenge: attested?.challenge))
+      pipe.submit(.flush)
+    }
   }
 
   /// A carried setting, onto a live pipe and into the getters. Caller holds `lock`.
@@ -823,6 +875,12 @@ final class FacadeState: @unchecked Sendable {
     }
     guard let pipe else { return }
     for item in commands { pipe.submit(item) }
+    // F7: a grant runs the attestation the install flow skipped for consent.
+    if case .setConsent(true) = command, let armed = attestationOnConsent {
+      attestationOnConsent = nil
+      // Only onto the engine whose install is waiting for it.
+      if armed.pipe === pipe { Self.attestAfterConsent(armed.attest, pipe: pipe) }
+    }
   }
 
   /// K2: one of each setting, in the order of their last write. The caller
@@ -1389,6 +1447,7 @@ final class FacadeState: @unchecked Sendable {
     flushTimer = nil
     lifecycleObservers = []
     installTask = nil
+    attestationOnConsent = nil
     return detached
   }
 

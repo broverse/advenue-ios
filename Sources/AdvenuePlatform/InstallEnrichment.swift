@@ -146,7 +146,7 @@ public func collectEnrichment(
 
 /// Runs `work` and gives up at the deadline. Returns nil when the deadline won,
 /// which the caller treats the same as "the source had nothing".
-func withDeadline<T: Sendable>(
+public func withDeadline<T: Sendable>(
   ms: Int, _ work: @escaping @Sendable () async -> T
 ) async -> T? {
   await withTaskGroup(of: Optional<T>.self) { group in

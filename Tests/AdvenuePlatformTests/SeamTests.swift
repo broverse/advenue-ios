@@ -5,6 +5,12 @@ import XCTest
 @testable import AdvenueCore
 @testable import AdvenuePlatform
 
+/// Counts how often an attestation source was asked.
+actor AttestationCounter {
+  private(set) var count = 0
+  func hit() { count += 1 }
+}
+
 /// Records every batch it is handed.
 actor RecordingTransport: EventTransport {
   private(set) var seen: [[String]] = []
@@ -270,6 +276,11 @@ final class SeamTests: XCTestCase {
     let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
     defaults?.removeObject(forKey: INSTALL_SENT_KEY)
     defaults?.removeObject(forKey: ENVIRONMENT_KEY)
+    // Consent and the user id: the consent cases persist a decision that would
+    // otherwise open (or close) the gate for the next case.
+    defaults?.removeObject(forKey: CONSENT_KEY)
+    defaults?.removeObject(forKey: CONSENT_DATA_KEY)
+    defaults?.removeObject(forKey: USER_ID_KEY)
     // Session state too: a case that backgrounds leaves a closed session behind,
     // and the next case's first foreground then reports the gap and emits a
     // session_end for it — a session boundary from the previous test.
@@ -892,6 +903,52 @@ final class SeamTests: XCTestCase {
     let install = await transport.installEvent()
     XCTAssertNotNil(install, "the install must ship without attestation")
     XCTAssertNil(install?.attestationToken)
+  }
+
+  /// F7 (spec D7): the attestation's challenge fetch carries the device id, so
+  /// under requireConsent it must not run before consent. Once consent is
+  /// granted it runs once, and the deferred install it releases carries it.
+  func testAttestationWaitsForConsentAndRidesTheReleasedInstall() async throws {
+    let transport = RecordingEventTransport()
+    let state = newState()
+    let calls = AttestationCounter()
+    let sources = EnrichmentSources(
+      searchAdsToken: { nil },
+      advertisingId: { (idfa: nil, vendorId: nil) },
+      appInstanceId: { nil },
+      attestation: {
+        await calls.hit()
+        return (
+          challenge: "challenge-consent",
+          result: AttestationResult(keyId: "key-consent", attestationObject: "attest-consent")
+        )
+      })
+
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    config.requireConsent = true
+    state.start(config, transport: transport, sources: sources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    // The install flow with settled sources finishes well inside this.
+    try await Task.sleep(nanoseconds: 500_000_000)
+    state.submit(.flush)
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let before = await calls.count
+    XCTAssertEqual(before, 0, "attestation ran (and fetched a challenge) before consent")
+    let earlyInstall = await transport.installEvent()
+    XCTAssertNil(earlyInstall, "no install may leave before consent")
+
+    state.rememberConsent(true)
+    state.submit(.setConsent(true))
+
+    try await Self.until(timeout: 8, state: state) { await transport.installEvent() != nil }
+    let install = await transport.installEvent()
+    let after = await calls.count
+    XCTAssertEqual(after, 1, "attestation must run exactly once, after consent")
+    XCTAssertEqual(install?.attestationToken, "attest-consent", "the released install lost its attestation")
+    XCTAssertEqual(install?.attestationKeyId, "key-consent")
+    XCTAssertEqual(install?.attestationChallenge, "challenge-consent")
   }
 
   /// Meta AEM: a link from Meta carries an opaque campaign_ids blob. Emitted at

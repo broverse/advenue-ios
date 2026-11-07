@@ -97,6 +97,9 @@ public actor AdvenueEngine {
   /// attribution, for the life of that installation.
   private var installDeferred: (token: String?, properties: [String: AdvenueValue]?,
     attestation: AttestationResult?, challenge: String?)?
+  /// F7: non-nil while the install waits for an attestation that consent
+  /// held back; the flush hold that wait may use.
+  private var attestationHoldMs: Int?
   private var skan: SkanStateMachine?
   private var skanReporter: (any SkanReporter)?
   /// The installation the SKAN machine persists under (K25).
@@ -286,6 +289,14 @@ public actor AdvenueEngine {
       releaseInstallHold()
       return false
     }
+    if let holdMs = attestationHoldMs {
+      // F7: consent arrived while the install's enrichment ran, after its
+      // attestation was skipped for the lack of it. The attestation run since
+      // is released onto this install; flushes stay behind it meanwhile.
+      installDeferred = (adservicesToken, properties, attestation, attestationChallenge)
+      installHoldUntilMs = clock.nowMs() + Int64(holdMs)
+      return false
+    }
     let installedAtMs = installStartedAtMs ?? clock.nowMs()
     releaseInstallHold()
 
@@ -347,10 +358,45 @@ public actor AdvenueEngine {
 
     // Granting consent releases an install that was refused for the lack of it.
     guard granted, let deferred = installDeferred else { return }
+    if let holdMs = attestationHoldMs {
+      // F7: the attestation skipped before consent runs now; the install is
+      // released with it (`releaseDeferredInstall`), and nothing flushes ahead
+      // of the install for at most `holdMs` meanwhile.
+      installHoldUntilMs = clock.nowMs() + Int64(holdMs)
+      return
+    }
     installDeferred = nil
     trackInstall(
       adservicesToken: deferred.token, properties: deferred.properties,
       attestation: deferred.attestation, attestationChallenge: deferred.challenge)
+  }
+
+  /// F7: this launch's attestation was skipped because consent was withheld,
+  /// so the install, once consent allows it, waits for `releaseDeferredInstall`.
+  public func awaitInstallAttestation(holdMs: Int) {
+    guard !forgotten else { return }
+    attestationHoldMs = holdMs
+  }
+
+  /// F7: the attestation run after consent. Released onto the deferred install
+  /// when consent allows it; kept on the deferred install otherwise.
+  public func releaseDeferredInstall(
+    attestation: AttestationResult?, attestationChallenge: String?
+  ) {
+    attestationHoldMs = nil
+    guard let deferred = installDeferred else { return }
+    let resolved = (
+      token: deferred.token, properties: deferred.properties,
+      attestation: attestation ?? deferred.attestation,
+      challenge: attestation != nil ? attestationChallenge : deferred.challenge)
+    if config.requireConsent && !consent {
+      installDeferred = resolved
+      return
+    }
+    installDeferred = nil
+    trackInstall(
+      adservicesToken: resolved.token, properties: resolved.properties,
+      attestation: resolved.attestation, attestationChallenge: resolved.challenge)
   }
 
   /// Granular ad-platform consent. Last write wins and it is persisted, so it
@@ -671,6 +717,12 @@ public enum Command: Sendable {
     adservicesToken: String?, attestation: AttestationResult?, attestationChallenge: String?)
   case beginInstall(holdMs: Int)
   case extendInstallHold(holdMs: Int)
+  /// F7: the install's attestation was not run because consent was withheld;
+  /// the install waits for `releaseDeferredInstall` rather than leave without
+  /// it once consent arrives (flushes held for at most `holdMs` meanwhile).
+  case awaitInstallAttestation(holdMs: Int)
+  /// F7: the attestation run after consent, released onto the deferred install.
+  case releaseDeferredInstall(attestation: AttestationResult?, attestationChallenge: String?)
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -754,6 +806,11 @@ public final class CommandPipe: @unchecked Sendable {
       await engine.setAppInstanceId(id)
     case .extendInstallHold(let holdMs):
       await engine.extendInstallHold(holdMs: holdMs)
+    case .awaitInstallAttestation(let holdMs):
+      await engine.awaitInstallAttestation(holdMs: holdMs)
+    case .releaseDeferredInstall(let attestation, let challenge):
+      await engine.releaseDeferredInstall(
+        attestation: attestation, attestationChallenge: challenge)
     case .beginInstall(let holdMs):
       await engine.beginInstall(holdMs: holdMs)
     case .trackInstall(let token, let attestation, let challenge):
