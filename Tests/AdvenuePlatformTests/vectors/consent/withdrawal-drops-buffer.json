@@ -1,0 +1,26 @@
+{
+  "name": "with requireConsent, withdrawing consent drops the buffer and nothing is uploaded while it stays withdrawn, also after a relaunch",
+  "source": "docs/superpowers/specs/2026-11-07-security-audit-run2-remediation-design.md D6 (audit run-2 F6) — a withdrawal must stop the identified events already buffered from leaving the device, not only the ones tracked after it. The relaunch case covers a queue persisted by an older SDK before the denial: a persisted denial alone must keep it on the device.",
+  "kind": "consent",
+  "requireConsent": true,
+  "steps": [
+    { "op": "setConsent", "granted": true },
+    { "op": "track", "name": "a", "expectAccepted": true },
+    { "op": "track", "name": "b", "expectAccepted": true },
+    { "op": "expectPending", "count": 2 },
+    { "op": "setConsent", "granted": false },
+    { "op": "expectPending", "count": 0 },
+    { "op": "expectStoredQueue", "count": 0 },
+    { "op": "flush" },
+    { "op": "expectRequests", "count": 0 },
+    { "op": "relaunch" },
+    { "op": "expectPending", "count": 0 },
+    { "op": "flush" },
+    { "op": "expectRequests", "count": 0 },
+    { "op": "seedQueue", "ids": ["stale-1", "stale-2"] },
+    { "op": "relaunch" },
+    { "op": "expectPending", "count": 2 },
+    { "op": "flush" },
+    { "op": "expectRequests", "count": 0 }
+  ]
+}

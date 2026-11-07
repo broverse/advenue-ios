@@ -50,6 +50,49 @@ final class ConsentGateTests: XCTestCase {
     XCTAssertTrue(pending.isEmpty)
   }
 
+  /// F6: a withdrawal drops the identified events already buffered, including
+  /// the blob a debounced persist already wrote, and nothing is uploaded.
+  func testWithdrawalDropsThePersistedQueueAndBlocksUpload() async {
+    let store = MemoryStore()
+    let scheduler = RecordingScheduler()
+    let transport = ScriptedTransport([])
+    let e = AdvenueEngine(
+      config: EngineConfig(apiKey: "apk_test", platform: "ios", deviceId: "d1", requireConsent: true),
+      store: store, clock: FixedClock(ms: 0), scheduler: scheduler,
+      uuid: SequentialUUIDs(prefix: "ev"), transport: transport)
+
+    await e.setConsent(true)
+    await e.track("a")
+    await e.track("b")
+    scheduler.runAll()
+    XCTAssertNotNil(store.raw(QUEUE_KEY), "precondition: the queue blob was persisted")
+
+    await e.setConsent(false)
+    await e.flush()
+
+    XCTAssertNil(store.raw(QUEUE_KEY), "the persisted queue must go with the withdrawal")
+    let pending = await e.pendingEvents()
+    XCTAssertTrue(pending.isEmpty)
+    let requests = await transport.requests
+    XCTAssertTrue(requests.isEmpty)
+  }
+
+  /// Without requireConsent a denial is a flag on the events, not a gate: the
+  /// queue is left alone and keeps uploading.
+  func testWithoutRequireConsentADenialKeepsTheQueue() async {
+    let store = MemoryStore()
+    let transport = ScriptedTransport([])
+    let e = AdvenueEngine(
+      config: EngineConfig(apiKey: "apk_test", platform: "ios", deviceId: "d1"),
+      store: store, clock: FixedClock(ms: 0), scheduler: RecordingScheduler(),
+      uuid: SequentialUUIDs(prefix: "ev"), transport: transport)
+    await e.track("a")
+    await e.setConsent(false)
+    await e.flush()
+    let requests = await transport.requests
+    XCTAssertEqual(requests.count, 1)
+  }
+
   /// Apple's conversion value is a measurement like any other, so it is gated
   /// like any other. Reporting revenue for a user who has not consented is a
   /// compliance failure rather than a parity detail.

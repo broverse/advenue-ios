@@ -337,6 +337,14 @@ public actor AdvenueEngine {
     consent = granted
     persistConsent(granted, to: store)
 
+    // F6 (spec D6): a withdrawal covers what is already buffered, not only what
+    // comes next. The queue holds identified events, so it is dropped together
+    // with its persisted blob (QUEUE_KEY last, for the reason `forgetMe` gives).
+    if config.requireConsent && !granted {
+      queue.clear()
+      store.removeObject(forKey: QUEUE_KEY)
+    }
+
     // Granting consent releases an install that was refused for the lack of it.
     guard granted, let deferred = installDeferred else { return }
     installDeferred = nil
@@ -538,6 +546,9 @@ public actor AdvenueEngine {
     // sub-session's last activity fresh even when the app records nothing.
     if !forgotten { sessions.heartbeat() }
     guard let transport else { return }
+    // F6: nothing leaves the device while consent is withheld — this also
+    // keeps a queue persisted before a denial on the device after a relaunch.
+    if uploadsBlockedByConsent() { return }
     if flushing || uploadsDisabled || queue.size == 0 || clock.nowMs() < backoffUntilMs || heldForInstall() {
       return
     }
@@ -588,8 +599,13 @@ public actor AdvenueEngine {
   /// dropped while the rest are delivered or kept. Stops at the first transient
   /// error, so a network drop mid-isolation cannot turn deliverable events into
   /// dropped ones.
+  private func uploadsBlockedByConsent() -> Bool { config.requireConsent && !consent }
+
   private func isolatePoison(_ events: [ClientEvent], _ transport: any EventTransport) async {
     for event in events {
+      // The actor is re-entrant across each send: a withdrawal that landed
+      // meanwhile stops the isolation rather than send the rest.
+      if uploadsBlockedByConsent() { return }
       do {
         try await transport.send([event])
         queue.ack([event])
