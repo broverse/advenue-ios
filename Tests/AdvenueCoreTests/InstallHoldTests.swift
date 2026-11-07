@@ -141,8 +141,19 @@ final class InstallHoldTests: XCTestCase {
     await e.trackInstall(adservicesToken: nil)
     await e.flush()
 
-    let requests = await transport.requests
-    XCTAssertEqual(requests, [["ev-1"]])
+    // F6: the withdrawal dropped what was buffered and nothing uploads.
+    var requests = await transport.requests
+    XCTAssertEqual(requests, [])
+
+    // Within the original hold window: a grant releases the deferred install
+    // and nothing still holds the flush back.
+    clock.ms += 1_000
+    await e.setConsent(true)
+    await e.flush()
+    requests = await transport.requests
+    XCTAssertEqual(requests.count, 1, "a lapsed-by-deferral hold must not hold the flush")
+    let names = await e.pendingEvents().map(\.name)
+    XCTAssertEqual(names, [])
   }
 
   /// An installation that already sent its install has nothing to wait for.
