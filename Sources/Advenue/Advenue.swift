@@ -674,6 +674,39 @@ final class FacadeState: @unchecked Sendable {
       }
     }
 
+    let installSourcesUngated =
+      sources
+      ?? EnrichmentSources.system(
+        appInstanceIdProvider: currentAppInstanceIdProvider,
+        attestation: {
+          // Two round trips, both best-effort: a device that cannot attest, a
+          // challenge the server would not issue, or an attestKey failure all
+          // yield nil and the install ships without the fields. An install held
+          // for attestation is an install lost.
+          let attestor = DeviceCheckAttestation(secure: secure)
+          let challenges = HttpChallengeFetcher(
+            endpoint: config.endpoint, apiKey: config.apiKey)
+          guard let challenge = try? await challenges.challenge(deviceId: deviceId),
+            let result = try? await attestor.attest(challenge: challenge)
+          else { return nil }
+          return (challenge: challenge, result: result)
+        })
+    // U2: an install a withdrawal kept is re-attested when consent is granted
+    // again, through the same release as a D7 install. Armed before the
+    // settings replay below, so a replayed grant already finds it. The engine
+    // starts it only when a grant finds a kept install: a grant with nothing
+    // kept fetches no challenge.
+    if config.requireConsent {
+      let attestKept = installSourcesUngated.attestation
+      pipe.submit(
+        .armInstallReattestation(
+          holdMs: INSTALL_WINDOW_MS + INSTALL_HOLD_MARGIN_MS,
+          start: { [weak pipe] in
+            guard let pipe else { return }
+            Self.attestAfterConsent(attestKept, pipe: pipe)
+          }))
+    }
+
     lock.lock()
     self.store = store
     self.secure = secure
@@ -746,23 +779,7 @@ final class FacadeState: @unchecked Sendable {
     // Enrichment, then the install, off the caller's thread. `initialize`
     // returns synchronously — an SDK that blocks
     // didFinishLaunchingWithOptions for three seconds is one nobody ships.
-    let installSourcesUngated =
-      sources
-      ?? EnrichmentSources.system(
-        appInstanceIdProvider: currentAppInstanceIdProvider,
-        attestation: {
-          // Two round trips, both best-effort: a device that cannot attest, a
-          // challenge the server would not issue, or an attestKey failure all
-          // yield nil and the install ships without the fields. An install held
-          // for attestation is an install lost.
-          let attestor = DeviceCheckAttestation(secure: secure)
-          let challenges = HttpChallengeFetcher(
-            endpoint: config.endpoint, apiKey: config.apiKey)
-          guard let challenge = try? await challenges.challenge(deviceId: deviceId),
-            let result = try? await attestor.attest(challenge: challenge)
-          else { return nil }
-          return (challenge: challenge, result: result)
-        })
+    // (`installSourcesUngated` is built above, before the settings replay.)
     // F7 (spec D7): the attestation's challenge fetch carries the device id,
     // so under requireConsent it does not run before consent. Skipped, it is
     // armed to run when consent is granted, and the engine holds the install
@@ -852,7 +869,7 @@ final class FacadeState: @unchecked Sendable {
   private static func eraseStored(store: any KeyValueStore, secure: any SecureStore) {
     for key in [
       CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY, INSTALL_SENT_KEY,
-      INSTALLATION_ID_KEY, QUEUE_KEY,
+      INSTALL_DEFERRED_KEY, INSTALLATION_ID_KEY, QUEUE_KEY,
     ] {
       store.removeObject(forKey: key)
     }

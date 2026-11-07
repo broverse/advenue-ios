@@ -25,6 +25,21 @@ actor RecordingEventTransport: EventTransport {
   func installEvent() -> ClientEvent? { events.first { $0.type == "install" } }
 }
 
+/// Fails every send (as a network error) until opened; records both what was
+/// attempted and what was delivered.
+actor GatedEventTransport: EventTransport {
+  private(set) var attempted: [ClientEvent] = []
+  private(set) var delivered: [ClientEvent] = []
+  private var isOpen = false
+  func open() { isOpen = true }
+  func send(_ batch: [ClientEvent]) async throws {
+    attempted.append(contentsOf: batch)
+    guard isOpen else { throw IngestError(status: 408) }
+    delivered.append(contentsOf: batch)
+  }
+  func attemptedInstall() -> ClientEvent? { attempted.first { $0.type == "install" } }
+}
+
 /// What the SDK told Apple. A named Sendable struct rather than a tuple: a
 /// tuple array crossing an actor boundary crashed the test process outright,
 /// which is a poor way to learn that the helper was the problem and not the SDK.
@@ -1033,6 +1048,64 @@ final class SeamTests: XCTestCase {
     XCTAssertEqual(install?.attestationToken, "attest-consent", "the released install lost its attestation")
     XCTAssertEqual(install?.attestationKeyId, "key-consent")
     XCTAssertEqual(install?.attestationChallenge, "challenge-consent")
+  }
+
+  /// U2 and Review Focus 4, through the facade: an install still queued when
+  /// consent is withdrawn is kept, and after withdraw, grant, withdraw, grant
+  /// exactly one install is delivered — the same event, attested afresh by the
+  /// D7 release path rather than carrying the attestation made before.
+  func testAWithdrawnInstallIsReattestedAndDeliveredOnceAfterTheNextGrant() async throws {
+    let transport = GatedEventTransport()
+    let state = newState()
+    let calls = AttestationCounter()
+    let sources = EnrichmentSources(
+      searchAdsToken: { nil },
+      advertisingId: { (idfa: nil, vendorId: nil) },
+      appInstanceId: { nil },
+      attestation: {
+        await calls.hit()
+        let n = await calls.count
+        return (
+          challenge: "challenge-\(n)",
+          result: AttestationResult(keyId: "key-\(n)", attestationObject: "attest-\(n)")
+        )
+      })
+
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    config.requireConsent = true
+    state.start(config, transport: transport, sources: sources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.rememberConsent(true)
+    state.submit(.setConsent(true))
+
+    // The install reaches the wire but is not delivered: still queued.
+    try await Self.until(timeout: 8, state: state) { await transport.attemptedInstall() != nil }
+    let attempted = await transport.attemptedInstall()
+    XCTAssertEqual(attempted?.attestationToken, "attest-1")
+
+    for granted in [false, true, false] {
+      state.rememberConsent(granted)
+      state.submit(.setConsent(granted))
+    }
+    await transport.open()
+    state.rememberConsent(true)
+    state.submit(.setConsent(true))
+
+    try await Self.until(timeout: 10, state: state) { await !transport.delivered.isEmpty }
+    // Settle: a second install would follow within a few flushes.
+    for _ in 0..<10 {
+      state.submit(.flush)
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    let installs = await transport.delivered.filter { $0.type == "install" }
+    XCTAssertEqual(installs.count, 1, "withdraw, grant, withdraw, grant must deliver one install")
+    XCTAssertEqual(installs.first?.id, attempted?.id, "the kept install is the same event")
+    XCTAssertEqual(installs.first?.timestamp, attempted?.timestamp)
+    XCTAssertNotNil(installs.first?.attestationToken, "the re-sent install lost its attestation")
+    XCTAssertNotEqual(
+      installs.first?.attestationToken, "attest-1",
+      "the attestation made before the withdrawal must not be re-sent")
   }
 
   /// Meta AEM: a link from Meta carries an opaque campaign_ids blob. Emitted at

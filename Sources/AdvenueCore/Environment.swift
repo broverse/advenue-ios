@@ -51,6 +51,8 @@ public func reconcileEnvironment(
   let dropped = queue.size
   queue.clear()
   store.removeObject(forKey: INSTALL_SENT_KEY)
+  // U2: an install a withdrawal kept belongs to the old environment too.
+  store.removeObject(forKey: INSTALL_DEFERRED_KEY)
   // LAST: a crash before this line leaves the old record, so the next launch
   // sees the change again and clears again. Writing it first would let the
   // old sandbox queue be uploaded as production.

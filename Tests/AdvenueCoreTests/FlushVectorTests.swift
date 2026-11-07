@@ -7,12 +7,15 @@ import XCTest
 actor ScriptedTransport: EventTransport {
   private let statuses: [Int]
   private(set) var requests: [[String]] = []
+  /// Every event handed over, whole, for the vectors that check what was sent.
+  private(set) var sent: [ClientEvent] = []
   private var call = 0
 
   init(_ statuses: [Int]) { self.statuses = statuses }
 
   func send(_ events: [ClientEvent]) async throws {
     requests.append(events.map(\.id))
+    sent.append(contentsOf: events)
     let status = call < statuses.count ? statuses[call] : 204
     call += 1
     // 0 models a network error, which the real transport reports as 408.

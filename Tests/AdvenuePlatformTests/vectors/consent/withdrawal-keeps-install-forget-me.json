@@ -1,0 +1,21 @@
+{
+  "name": "with requireConsent, forgetMe deletes an install kept by a withdrawal and nothing is sent afterwards",
+  "source": "docs/superpowers/specs/2026-11-07-security-audit-run2-followups-design.md U2 (case 3: withdraw, forgetMe). An erasure is not a withdrawal: the kept install belongs to the identity being erased.",
+  "kind": "consent",
+  "requireConsent": true,
+  "steps": [
+    { "op": "setConsent", "granted": true },
+    { "op": "trackInstall", "expectAccepted": true },
+    { "op": "setConsent", "granted": false },
+    { "op": "expectDeferredInstall", "present": true },
+    { "op": "forgetMe" },
+    { "op": "expectDeferredInstall", "present": false },
+    { "op": "setConsent", "granted": true },
+    { "op": "flush" },
+    { "op": "expectRequests", "count": 0 },
+    { "op": "relaunch" },
+    { "op": "setConsent", "granted": true },
+    { "op": "flush" },
+    { "op": "expectRequests", "count": 0 }
+  ]
+}

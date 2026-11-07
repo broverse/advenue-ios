@@ -61,6 +61,11 @@ public let MAX_BATCH_SIZE = 100
 /// core because the engine owns the guard — the Keychain is deliberately never
 /// consulted for it, since a durable flag would suppress legitimate reinstalls.
 public let INSTALL_SENT_KEY = "advenue.install_sent"
+/// Follow-ups U2: an install a requireConsent withdrawal took out of the queue
+/// before it left, kept (without its consent-gated fields) so a later grant
+/// re-sends it with the same event id and install timestamp. Its presence
+/// means the install is still owed: `INSTALL_SENT_KEY` is cleared with it.
+public let INSTALL_DEFERRED_KEY = "advenue.install_deferred"
 public let CONSENT_KEY = "advenue.consent"
 public let CONSENT_DATA_KEY = "advenue.consent_data"
 public let USER_ID_KEY = "advenue.user_id"
@@ -100,6 +105,10 @@ public actor AdvenueEngine {
   /// F7: non-nil while the install waits for an attestation that consent
   /// held back; the flush hold that wait may use.
   private var attestationHoldMs: Int?
+  /// U2: how the facade re-attests an install a withdrawal kept, once consent
+  /// is granted again (the D7 release path). Nil in the core alone: the kept
+  /// install is then re-sent without attestation.
+  private var reattestation: (holdMs: Int, start: @Sendable () -> Void)?
   private var skan: SkanStateMachine?
   private var skanReporter: (any SkanReporter)?
   /// The installation the SKAN machine persists under (K25).
@@ -299,10 +308,15 @@ public actor AdvenueEngine {
     }
     let installedAtMs = installStartedAtMs ?? clock.nowMs()
     releaseInstallHold()
+    // U2: an install a withdrawal kept is the install; it keeps its event id
+    // (so ingestion dedup absorbs a copy that did reach the server) and the
+    // original install time. The identifiers below are collected now.
+    let kept = keptInstall()
 
     var event = ClientEvent(
-      id: uuid.next(), deviceId: config.deviceId, type: "install", name: "install",
-      timestamp: EventEncoding.iso8601(ms: installedAtMs), platform: config.platform)
+      id: kept?.id ?? uuid.next(), deviceId: config.deviceId, type: "install", name: "install",
+      timestamp: kept?.timestamp ?? EventEncoding.iso8601(ms: installedAtMs),
+      platform: config.platform)
     event.installationId = config.installationId
     event.appVersion = config.appVersion
     event.osVersion = config.osVersion
@@ -320,7 +334,7 @@ public actor AdvenueEngine {
     event.pushToken = pushToken
     event.pushProvider = pushProvider
     // Install-only: an attribution input, not a per-event property.
-    event.adservicesToken = adservicesToken
+    event.adservicesToken = adservicesToken ?? kept?.adservicesToken
     if let attestation {
       event.attestationToken = attestation.attestationObject
       event.attestationType = "app-attest"
@@ -329,11 +343,12 @@ public actor AdvenueEngine {
     }
     // Merged rather than replacing: a caller-supplied property of the same name
     // is the app's own and wins.
+    let callerProperties = properties ?? kept?.properties
     let merged: [String: AdvenueValue]?
     if let deviceInfo {
-      merged = deviceInfo.merging(properties ?? [:]) { _, caller in caller }
+      merged = deviceInfo.merging(callerProperties ?? [:]) { _, caller in caller }
     } else {
-      merged = properties
+      merged = callerProperties
     }
     event.properties = config.piiScrubEnabled ? PIIScrub.scrub(merged) : merged
     // At the head: the session and custom events recorded while enrichment ran
@@ -341,7 +356,45 @@ public actor AdvenueEngine {
     queue.enqueueFirst(event)
 
     store.set("1", forKey: INSTALL_SENT_KEY)
+    if kept != nil { store.removeObject(forKey: INSTALL_DEFERRED_KEY) }
     return true
+  }
+
+  /// U2: the install a withdrawal kept, if any. Read from the store each time
+  /// rather than mirrored, so a relaunch and this launch agree by construction.
+  private func keptInstall() -> ClientEvent? {
+    guard let raw = store.string(forKey: INSTALL_DEFERRED_KEY), let data = raw.data(using: .utf8)
+    else { return nil }
+    return try? JSONDecoder().decode(ClientEvent.self, from: data)
+  }
+
+  /// U2: keeps a queued install a withdrawal is about to drop. Everything the
+  /// withdrawn consent covered goes: the advertising and vendor ids, the user
+  /// id, the granular consent, the push token and the attestation. What stays
+  /// is what makes it the same install: its id, its time, its properties and
+  /// the AdServices token. Written before the queue is cleared: a crash in
+  /// between costs a duplicate the server dedups, never the install.
+  private func keepInstall(_ install: ClientEvent) {
+    var kept = install
+    kept.idfa = nil
+    kept.gaid = nil
+    kept.vendorId = nil
+    kept.androidId = nil
+    kept.appInstanceId = nil
+    kept.limitAdTracking = nil
+    kept.attStatus = nil
+    kept.customerUserId = nil
+    kept.consent = nil
+    kept.pushToken = nil
+    kept.pushProvider = nil
+    kept.attestationToken = nil
+    kept.attestationType = nil
+    kept.attestationKeyId = nil
+    kept.attestationChallenge = nil
+    kept.deviceCheckToken = nil
+    guard let data = try? EventEncoding.canonicalEncoder().encode(kept) else { return }
+    store.set(String(decoding: data, as: UTF8.self), forKey: INSTALL_DEFERRED_KEY)
+    store.removeObject(forKey: INSTALL_SENT_KEY)
   }
 
   public func setConsent(_ granted: Bool) {
@@ -352,12 +405,21 @@ public actor AdvenueEngine {
     // comes next. The queue holds identified events, so it is dropped together
     // with its persisted blob (QUEUE_KEY last, for the reason `forgetMe` gives).
     if config.requireConsent && !granted {
+      // U2: the install is the one exception. A queued one is kept, without
+      // its identifiers, and re-sent on the next grant.
+      if !forgotten, let install = queue.peek(Int.max).first(where: { $0.type == "install" }) {
+        keepInstall(install)
+      }
       queue.clear()
       store.removeObject(forKey: QUEUE_KEY)
     }
 
+    guard granted, !forgotten else { return }
     // Granting consent releases an install that was refused for the lack of it.
-    guard granted, let deferred = installDeferred else { return }
+    guard let deferred = installDeferred else {
+      releaseKeptInstall()
+      return
+    }
     if let holdMs = attestationHoldMs {
       // F7: the attestation skipped before consent runs now; the install is
       // released with it (`releaseDeferredInstall`), and nothing flushes ahead
@@ -369,6 +431,36 @@ public actor AdvenueEngine {
     trackInstall(
       adservicesToken: deferred.token, properties: deferred.properties,
       attestation: deferred.attestation, attestationChallenge: deferred.challenge)
+  }
+
+  /// U2: a grant re-sends the install a withdrawal kept. With a re-attestation
+  /// armed it waits for it, as a D7 install does (`releaseDeferredInstall`);
+  /// an attestation this launch already waits for is the same wait.
+  private func releaseKeptInstall() {
+    guard config.requireConsent, let kept = keptInstall() else { return }
+    let resolved = (
+      token: kept.adservicesToken, properties: kept.properties,
+      attestation: AttestationResult?.none, challenge: String?.none)
+    if attestationHoldMs == nil, let reattestation {
+      attestationHoldMs = reattestation.holdMs
+      reattestation.start()
+    }
+    if let holdMs = attestationHoldMs {
+      installDeferred = resolved
+      installHoldUntilMs = clock.nowMs() + Int64(holdMs)
+      return
+    }
+    trackInstall(
+      adservicesToken: resolved.token, properties: resolved.properties,
+      attestation: nil, attestationChallenge: nil)
+  }
+
+  /// U2: arms the re-attestation a kept install waits for on a grant. `start`
+  /// runs the attestation and submits `releaseDeferredInstall`; it is called
+  /// only when a grant finds a kept install and nothing else attesting.
+  public func armInstallReattestation(holdMs: Int, start: @escaping @Sendable () -> Void) {
+    guard !forgotten else { return }
+    reattestation = (holdMs, start)
   }
 
   /// F7: this launch's attestation was skipped because consent was withheld,
@@ -532,7 +624,10 @@ public actor AdvenueEngine {
     customerUserId = nil
     // QUEUE_KEY last: queue.clear() above persists an empty blob synchronously,
     // and `forgotten` stops every later enqueue, so nothing rewrites it.
-    for key in [CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY, QUEUE_KEY] {
+    // U2: an erasure is not a withdrawal; the kept install goes with the rest.
+    for key in [
+      CONSENT_KEY, CONSENT_DATA_KEY, SESSION_STATE_KEY, USER_ID_KEY, INSTALL_DEFERRED_KEY, QUEUE_KEY,
+    ] {
       store.removeObject(forKey: key)
     }
   }
@@ -553,7 +648,8 @@ public actor AdvenueEngine {
     queue.clear()
     sessions.reset()
     // QUEUE_KEY last, for the reason `forgetMe` gives.
-    for key in [SESSION_STATE_KEY, INSTALL_SENT_KEY, QUEUE_KEY] {
+    // A reset is a new install: the old one's kept install must not ride it.
+    for key in [SESSION_STATE_KEY, INSTALL_SENT_KEY, INSTALL_DEFERRED_KEY, QUEUE_KEY] {
       store.removeObject(forKey: key)
     }
   }
@@ -723,6 +819,8 @@ public enum Command: Sendable {
   case awaitInstallAttestation(holdMs: Int)
   /// F7: the attestation run after consent, released onto the deferred install.
   case releaseDeferredInstall(attestation: AttestationResult?, attestationChallenge: String?)
+  /// U2: how a kept install is re-attested when consent is granted again.
+  case armInstallReattestation(holdMs: Int, start: @Sendable () -> Void)
 }
 
 /// The ordered ingress: a synchronous, non-blocking `submit` feeding one
@@ -811,6 +909,8 @@ public final class CommandPipe: @unchecked Sendable {
     case .releaseDeferredInstall(let attestation, let challenge):
       await engine.releaseDeferredInstall(
         attestation: attestation, attestationChallenge: challenge)
+    case .armInstallReattestation(let holdMs, let start):
+      await engine.armInstallReattestation(holdMs: holdMs, start: start)
     case .beginInstall(let holdMs):
       await engine.beginInstall(holdMs: holdMs)
     case .trackInstall(let token, let attestation, let challenge):
