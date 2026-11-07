@@ -334,6 +334,12 @@ final class FacadeState: @unchecked Sendable {
   /// final value of each setting matters, and a buffer that grows with every
   /// call is a leak with a long drain behind it.
   private var resetBuffer: [Command]?
+  /// NV1 (spec D8): setConsent, setConsentData and setUserId made while no
+  /// pipe exists outside a reset or an erasure — before the first initialize,
+  /// or after shutdown. Applied by the next start that installs a pipe, after
+  /// the engine loaded the store, so they win over the persisted values. One
+  /// of each, as the reset buffer (K2). Under `lock`.
+  private var pendingSettings: [Command] = []
   /// K25: moves on every forgetMe. A reset whose restart was claimed returns
   /// nil if an erasure landed after the claim.
   private var erasures = 0
@@ -686,6 +692,12 @@ final class FacadeState: @unchecked Sendable {
     let carried = resetBuffer ?? []
     resetBuffer = nil
     for command in carried { applySettingLocked(command, pipe: pipe) }
+    // NV1 (spec D8): settings made with no pipe (before the first initialize,
+    // or after shutdown) override what the engine just loaded from the store,
+    // and reseed the getters over it.
+    let pending = pendingSettings
+    pendingSettings = []
+    for command in pending { applySettingLocked(command, pipe: pipe) }
     self.resolvedDeviceId = deviceId
     let buffered = pendingDeepLinks
     pendingDeepLinks = []
@@ -870,6 +882,11 @@ final class FacadeState: @unchecked Sendable {
         // After forgetMe, until the next start: what the erased engine
         // used to persist, persisted here.
         persistSettingCommand(command, to: store)
+      } else {
+        // NV1 (spec D8): before the first initialize or after shutdown. Kept
+        // and replayed by the next start over what the store persisted — a
+        // withdrawal made here must not lose to an earlier run's grant.
+        Self.keepLatest(command, in: &pendingSettings)
       }
       return
     }
@@ -886,9 +903,15 @@ final class FacadeState: @unchecked Sendable {
   /// K2: one of each setting, in the order of their last write. The caller
   /// holds `lock`.
   private func bufferForResetLocked(_ command: Command) {
-    let kind = Self.settingKind(command)
-    resetBuffer?.removeAll { Self.settingKind($0) == kind }
-    resetBuffer?.append(command)
+    guard resetBuffer != nil else { return }
+    Self.keepLatest(command, in: &resetBuffer!)
+  }
+
+  /// One of each setting, in the order of their last write.
+  private static func keepLatest(_ command: Command, in buffer: inout [Command]) {
+    let kind = settingKind(command)
+    buffer.removeAll { settingKind($0) == kind }
+    buffer.append(command)
   }
 
   /// Test surface: what a reset's drain is holding for the next pipe.
@@ -992,6 +1015,8 @@ final class FacadeState: @unchecked Sendable {
       storeOwner += 1
       let detached = detachLocked()
       resetBuffer = nil
+      // Settings made before the erasure belong to the identity it erases.
+      pendingSettings = []
       // FM1: links buffered before the erasure (a reset's drain buffers them,
       // K7) belong to the identity being erased: dropped, not replayed under
       // the next one.

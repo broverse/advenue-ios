@@ -905,6 +905,90 @@ final class SeamTests: XCTestCase {
     XCTAssertNil(install?.attestationToken)
   }
 
+  /// NV1 (spec D8): a withdrawal issued before initialize must override the
+  /// grant an earlier run persisted — in the store, the getter and the gate.
+  func testAWithdrawalBeforeInitializeOverridesThePersistedGrant() async throws {
+    let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
+    defaults?.set("granted", forKey: CONSENT_KEY)
+    let transport = RecordingTransport()
+    let state = newState()
+
+    state.rememberConsent(false)
+    state.submit(.setConsent(false))
+
+    var config = AdvenueConfig(apiKey: "apk_live_x", requireConsent: true)
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    XCTAssertFalse(state.trackingConsent, "the mirror was reseeded from the stale grant")
+    state.submit(.track(name: "probe", properties: nil, type: "custom"))
+    state.submit(.flush)
+    try await Task.sleep(nanoseconds: 600_000_000)
+    state.submit(.flush)
+    try await Task.sleep(nanoseconds: 200_000_000)
+
+    let seen = await transport.seen
+    XCTAssertEqual(seen.flatMap { $0 }, [], "an event left after the user withdrew consent")
+    XCTAssertEqual(defaults?.string(forKey: CONSENT_KEY), "denied")
+  }
+
+  /// NV1: the same after shutdown, before the next initialize.
+  func testAWithdrawalAfterShutdownOverridesThePersistedGrant() async throws {
+    let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
+    let transport = RecordingTransport()
+    let state = newState()
+    var config = AdvenueConfig(apiKey: "apk_live_x", requireConsent: true)
+    config.flushIntervalMs = 0
+
+    state.start(config, transport: transport, sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+    state.rememberConsent(true)
+    state.submit(.setConsent(true))
+    try await Self.until(timeout: 5, state: state) {
+      UserDefaults(suiteName: ADVENUE_SUITE)?.string(forKey: CONSENT_KEY) == "granted"
+    }
+    state.stop()
+
+    state.rememberConsent(false)
+    state.submit(.setConsent(false))
+    let afterTransport = RecordingTransport()
+    state.start(config, transport: afterTransport, sources: Self.settledSources)
+
+    XCTAssertFalse(state.trackingConsent)
+    state.submit(.track(name: "probe", properties: nil, type: "custom"))
+    state.submit(.flush)
+    try await Task.sleep(nanoseconds: 600_000_000)
+    state.submit(.flush)
+    try await Task.sleep(nanoseconds: 200_000_000)
+
+    let seen = await afterTransport.seen
+    XCTAssertFalse(seen.flatMap { $0 }.contains("probe"), "a withdrawn user's event left")
+    XCTAssertEqual(defaults?.string(forKey: CONSENT_KEY), "denied")
+  }
+
+  /// NV1: setUserId before initialize is applied, not dropped.
+  func testAUserIdSetBeforeInitializeIsApplied() async throws {
+    let defaults = UserDefaults(suiteName: ADVENUE_SUITE)
+    let transport = RecordingEventTransport()
+    let state = newState()
+
+    state.submit(.setUserId("user-pre-init"))
+
+    var config = AdvenueConfig(apiKey: "apk_live_x")
+    config.flushIntervalMs = 0
+    state.start(config, transport: transport, sources: Self.settledSources)
+    try XCTSkipIf(state.currentDeviceId == nil, "identity deferred in this environment")
+
+    state.submit(.track(name: "probe", properties: nil, type: "custom"))
+    try await Self.until(timeout: 5, state: state) {
+      await transport.events.contains { $0.name == "probe" }
+    }
+    let probe = await transport.events.first { $0.name == "probe" }
+    XCTAssertEqual(probe?.customerUserId, "user-pre-init")
+    XCTAssertEqual(defaults?.string(forKey: USER_ID_KEY), "user-pre-init")
+  }
+
   /// F7 (spec D7): the attestation's challenge fetch carries the device id, so
   /// under requireConsent it must not run before consent. Once consent is
   /// granted it runs once, and the deferred install it releases carries it.
