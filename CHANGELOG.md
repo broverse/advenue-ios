@@ -3,6 +3,20 @@
 The version is `AdvenueVersion.current` and the podspec's `s.version`; both are
 stamped on every event as `sdkVersion`. Release tags are `sdk-swift-v<version>`.
 
+## 1.5.0
+
+- **Withdrawing consent stops uploads at once.** Under `requireConsent`,
+  `setConsent(false)` drops queued events and blocks further uploads until
+  consent is granted again.
+- **A queued install survives a withdrawal.** If the install had not been sent
+  yet, it is kept without identifiers and re-sent on the next grant with the
+  same event id and install time (also across a relaunch). `forgetMe` deletes
+  it.
+- **Settings issued before consent are kept** and applied at start instead of
+  being lost.
+- **No attestation before consent.** The App Attest challenge is no longer
+  fetched until consent is granted.
+
 ## 1.4.0
 
 - **`environment: .sandbox`.** Test traffic goes to a separate sandbox store

@@ -131,5 +131,5 @@ public struct AdvenueConfig: Sendable {
 /// release tag unless something checks. CI does, because the first question
 /// every field report raises is which build produced the event.
 public enum AdvenueVersion {
-  public static let current = "1.4.0"
+  public static let current = "1.5.0"
 }
